@@ -157,7 +157,7 @@ class CSharpCodeAnalyzer:
                 content = f.read()
                 # Find project references
                 proj_matches = re.findall(
-                    r'"([^"]+\.csproj"',
+                    r'"([^"]+\.csproj)"',
                     content
                 )
                 for proj in proj_matches:
