@@ -59,7 +59,7 @@ class VectorStore:
         VectorStore._ST_CHECKED = True
         try:
             # Just check if it can be imported, don't load the model
-            import importlib
+            import importlib.util
             spec = importlib.util.find_spec("sentence_transformers")
             if spec is not None:
                 VectorStore._ST_AVAILABLE = True
