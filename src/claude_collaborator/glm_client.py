@@ -1,6 +1,6 @@
 """
 GLM Client for AI Research Tasks
-Handles communication with GLM-4.7 API
+Handles communication with GLM-5 API
 """
 
 import os
@@ -12,12 +12,12 @@ load_dotenv()
 
 
 class GLMClient:
-    """Client for GLM-4.7 API"""
+    """Client for GLM-5 API"""
 
     def __init__(self):
         """Initialize GLM client"""
         self.api_key = os.getenv("GLM_API_KEY")
-        self.model = os.getenv("GLM_MODEL", "glm-4.7")
+        self.model = os.getenv("GLM_MODEL", "glm-5")
         self.base_url = "https://api.z.ai/api/paas/v4"
         self.timeout = 120  # 120 second timeout for API calls
 
@@ -70,8 +70,8 @@ Be specific and reference code elements when possible."""
                     }
                 ],
                 max_tokens=max_tokens,
-                temperature=0.7,
-                thinking={"type": "disabled"},  # Disable thinking to avoid timeout
+                temperature=1.0,
+                thinking={"type": "enabled"},
                 timeout=self.timeout
             )
 
@@ -119,8 +119,8 @@ Be specific and reference code elements when possible."""
                     }
                 ],
                 max_tokens=max_tokens,
-                temperature=0.7,
-                thinking={"type": "disabled"},  # Disable thinking to avoid timeout
+                temperature=1.0,
+                thinking={"type": "enabled"},
                 timeout=self.timeout
             )
 
@@ -176,8 +176,8 @@ Provide:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=2048,
-                temperature=0.7,
-                thinking={"type": "disabled"},  # Disable thinking to avoid timeout
+                temperature=1.0,
+                thinking={"type": "enabled"},
                 timeout=self.timeout
             )
 
@@ -233,8 +233,8 @@ Provide a comprehensive analysis including:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=4096,
-                temperature=0.7,
-                thinking={"type": "disabled"},
+                temperature=1.0,
+                thinking={"type": "enabled"},
                 timeout=self.timeout
             )
 

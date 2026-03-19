@@ -50,7 +50,7 @@ class Config:
         """Load configuration from all sources"""
         # Start with defaults
         self._config = {
-            "glm_model": "glm-4.7",
+            "glm_model": "glm-5",
             "memory_path": ".codebase-memory",
         }
 

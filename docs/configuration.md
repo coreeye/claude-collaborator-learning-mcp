@@ -21,7 +21,7 @@ Place this file in your codebase root:
 ```json
 {
   "codebase_path": ".",
-  "glm_model": "glm-4.7",
+  "glm_model": "glm-5",
   "glm_api_key": "your_api_key_here",
   "memory_path": ".codebase-memory"
 }
@@ -34,7 +34,7 @@ Place this file in your codebase root:
 ```json
 {
   "codebase_path": ".",
-  "glm_model": "glm-4.7",
+  "glm_model": "glm-5",
   "glm_api_key": "your_api_key_here",
   "memory_path": ".codebase-memory"
 }
@@ -46,7 +46,7 @@ For settings that apply to all projects:
 
 ```json
 {
-  "glm_model": "glm-4.7",
+  "glm_model": "glm-5",
   "glm_api_key": "your_global_api_key"
 }
 ```
@@ -57,7 +57,7 @@ For settings that apply to all projects:
 |--------|------|---------|-------------|
 | `codebase_path` | string | auto-detected | Path to C# solution root (`.sln` file) |
 | `glm_api_key` | string | (none) | API key for GLM integration |
-| `glm_model` | string | `glm-4.7` | GLM model to use |
+| `glm_model` | string | `glm-5` | GLM model to use |
 | `memory_path` | string | `.codebase-memory` | Path for memory storage |
 
 ## Environment Variables
@@ -241,7 +241,7 @@ pip install zai-sdk openai
 
 ### Available Models
 
-- `glm-4.7` - Latest model (default)
+- `glm-5` - Latest model (default)
 - `glm-4-flash` - Faster responses
 - `glm-4-plus` - Enhanced capabilities
 

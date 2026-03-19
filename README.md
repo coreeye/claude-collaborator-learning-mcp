@@ -2,6 +2,19 @@
 
 Multi-AI MCP server for C# codebases. Claude + GLM working together.
 
+## Philosophy
+
+**Claude is the architect. GLM is the creative sidekick.**
+
+This MCP server empowers Claude with a creative companion:
+
+- **Claude (the Boss)**: Makes decisions, directs work, and synthesizes information
+- **GLM (the Sidekick)**: Explores alternatives, challenges assumptions, and offers fresh perspectives
+
+GLM is configured for **creativity** and **deep thinking** — it doesn't just answer questions, it considers multiple angles and unconventional ideas. Claude then evaluates these insights and makes the final call. This two-AI approach surfaces possibilities that a single model might miss.
+
+> "The enemy of art is the absence of limitations." — GLM explores the space; Claude finds the best path.
+
 ## Features
 
 - **Persistent Memory**: Never re-explain your architecture across sessions
@@ -108,7 +121,7 @@ The server looks for configuration in this priority order:
 |--------|---------|-------------|
 | `codebase_path` | auto-detected | Path to C# solution |
 | `glm_api_key` | (none) | GLM API key |
-| `glm_model` | `glm-4.7` | GLM model to use |
+| `glm_model` | `glm-5` | GLM model to use |
 | `memory_path` | `.codebase-memory` | Memory storage path |
 
 ### Environment Variables
@@ -149,7 +162,7 @@ Configure separate servers for different codebases:
 
 ## GLM Integration (Optional)
 
-GLM provides additional AI-powered code exploration:
+GLM serves as Claude's creative sidekick, configured for maximum creativity and deep reasoning:
 
 ```bash
 # Install GLM dependencies
@@ -159,9 +172,17 @@ pip install claude-collaborator[glm]
 export GLM_API_KEY=your_api_key_here
 ```
 
+### GLM Configuration
+
+GLM runs with **temperature 1.0** and **deep thinking enabled** — optimized to:
+- Generate diverse, creative ideas
+- Consider unconventional approaches
+- Challenge Claude's assumptions
+- Provide alternative viewpoints
+
 ### Available GLM Models
 
-- `glm-4.7` - Latest model (default)
+- `glm-5` - Latest model with deep thinking (default)
 - `glm-4-flash` - Faster responses
 - `glm-4-plus` - Enhanced capabilities
 
