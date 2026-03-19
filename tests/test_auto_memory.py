@@ -193,6 +193,50 @@ def test_auto_capture_tools():
     print("[PASS] Auto-capture tools tests passed!\n")
 
 
+def test_truncation():
+    """Test that large tool results are properly truncated"""
+    print("Testing Result Truncation...")
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    from claude_collaborator.server import ClaudeCollaboratorServer
+    from mcp.types import TextContent
+
+    server = ClaudeCollaboratorServer()
+
+    # Test 1: Small result should NOT be truncated
+    small_text = "This is a small result."
+    content = [TextContent(type="text", text=small_text)]
+    result = server._process_tool_result("test_tool", {}, content)
+    assert len(result) == 1, "Should return one item"
+    assert result[0].text == small_text, "Small result should not be truncated"
+    print("  [PASS] Small result is not truncated")
+
+    # Test 2: Large result SHOULD be truncated
+    # MAX_TOOL_RESULT_SIZE is 1500, so create a result larger than that
+    large_text = "A" * 5000  # 5000 chars - should be truncated
+    content = [TextContent(type="text", text=large_text)]
+    result = server._process_tool_result("test_tool", {}, content)
+    assert len(result) == 1, "Should return one item"
+    truncated_result = result[0].text
+
+    # Should be truncated with marker
+    assert "[RESULT TRUNCATED:" in truncated_result, "Should contain truncation marker"
+    assert "5000 chars total" in truncated_result, "Should show original size"
+    # Result should be shorter than original (500 + marker + 200 = ~750 chars max)
+    assert len(truncated_result) < 1000, f"Truncated result should be under 1000 chars, got {len(truncated_result)}"
+    print(f"  [PASS] Large result truncated from {len(large_text)} to {len(truncated_result)} chars")
+
+    # Test 3: Verify truncation keeps first and last parts
+    assert truncated_result.startswith("A" * 500), "Should keep first 500 chars"
+    # Last part should be after the truncation note
+    truncation_idx = truncated_result.find("[RESULT TRUNCATED:")
+    after_note = truncated_result[truncation_idx + len("[RESULT TRUNCATED: 5000 chars total] .."):]
+    assert after_note.endswith("A" * 200), "Should keep last 200 chars"
+    print("  [PASS] Truncation preserves first and last parts")
+
+    print("[PASS] Result truncation tests passed!\n")
+
+
 def run_all_tests():
     """Run all tests"""
     print("=" * 60)
@@ -205,6 +249,7 @@ def run_all_tests():
         test_session_state()
         test_server_methods()
         test_auto_capture_tools()
+        test_truncation()  # New test
 
         print("=" * 60)
         print("[PASS] ALL TESTS PASSED!")

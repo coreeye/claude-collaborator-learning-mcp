@@ -49,6 +49,7 @@ class ClaudeCollaboratorServer:
     MAX_GLM_CONTEXT = 10000  # characters
     MAX_CODE_LINES = 500     # lines to send to GLM
     MAX_MEMORY_RESULTS = 3    # number of memory results to include
+    MAX_TOOL_RESULT_SIZE = 1500  # max chars for tool result before truncation (reduced for better context management)
 
     def __init__(self, codebase_path: str = None):
         """Initialize the server with configurable codebase path"""
@@ -84,11 +85,17 @@ class ClaudeCollaboratorServer:
         # Register tools
         self._register_tools()
 
-        # Initialize codebase ONLY if explicitly provided
-        # Do NOT auto-detect from config - user must call switch_codebase
-        if codebase_path:
-            self.switch_codebase(codebase_path)
-        # Otherwise start uninitialized - user must call switch_codebase
+        # Store configured codebase path for lazy initialization
+        # Priority: 1) passed argument, 2) config, 3) None (requires switch_codebase)
+        self._configured_codebase_path = codebase_path
+        if not self._configured_codebase_path:
+            # Try to get from config
+            config_path = self.config.get("codebase_path")
+            if config_path:
+                self._configured_codebase_path = str(config_path)
+
+        # DON'T initialize here - will be lazy-loaded in _ensure_codebase()
+        # This prevents blocking the MCP server from starting
 
     def _initialize_codebase(self, path: Path):
         """Initialize analyzer and memory store for a codebase path"""
@@ -138,6 +145,28 @@ class ClaudeCollaboratorServer:
             self.file_cache = None
             self.session_state = None
 
+    def _ensure_codebase(self):
+        """
+        Ensure codebase is initialized (lazy loading).
+
+        This is called on first tool access instead of during __init__
+        to prevent blocking the MCP server from starting.
+        """
+        # Already initialized
+        if self.codebase_path is not None:
+            return
+
+        # No codebase configured
+        if not self._configured_codebase_path:
+            return
+
+        try:
+            self._initialize_codebase(Path(self._configured_codebase_path))
+        except Exception as e:
+            print(f"Warning: Could not initialize codebase: {e}")
+            print(f"  Path was: {self._configured_codebase_path}")
+            print(f"  Use switch_codebase() to select a codebase manually.")
+
     def switch_codebase(self, path: str) -> dict:
         """
         Switch to a different codebase.
@@ -160,6 +189,9 @@ class ClaudeCollaboratorServer:
                 "success": False,
                 "error": f"Path not found: {new_path}"
             }
+
+        # Store the path for future lazy loading
+        self._configured_codebase_path = str(new_path)
 
         # Reinitialize components
         self._initialize_codebase(new_path)
@@ -229,7 +261,14 @@ class ClaudeCollaboratorServer:
         }
 
     def _check_initialized(self) -> tuple[bool, str]:
-        """Check if codebase is initialized. Returns (is_ready, error_message)"""
+        """
+        Check if codebase is initialized. Returns (is_ready, error_message).
+
+        Triggers lazy initialization if codebase path is configured but not yet loaded.
+        """
+        # Try lazy initialization first
+        self._ensure_codebase()
+
         if self.codebase_path is None:
             return False, (
                 "No codebase selected. Use `switch_codebase` to select a codebase first.\n"
@@ -309,13 +348,15 @@ class ClaudeCollaboratorServer:
         Post-process tool result: capture, track context, check compaction.
         Runs AFTER every tool completion.
 
+        IMPORTANT: Also truncates large results to prevent conversation context overflow.
+
         Args:
             tool_name: Name of the tool that was called
             arguments: Tool arguments
             result: Tool result to process
 
         Returns:
-            Processed result (possibly with context added)
+            Processed result (possibly with context added and truncated)
         """
         if not result or len(result) == 0:
             return result
@@ -323,33 +364,49 @@ class ClaudeCollaboratorServer:
         # Extract text content
         result_text = result[0].text if hasattr(result[0], 'text') else str(result[0])
 
-        # 1. Auto-capture to vector memory (if significant)
-        self._maybe_auto_capture(tool_name, arguments, result_text)
+        # 1. TRUNCATE result for response to prevent conversation context overflow
+        # This is the key fix - large results get truncated before being sent to Claude
+        display_text = result_text
 
-        # 2. Track context size
-        if self.context_tracker:
-            self.context_tracker.add_context(
-                content=result_text,
-                metadata={"tool": tool_name, "arguments": str(arguments)},
-                item_type="tool_result"
-            )
+        if len(result_text) > self.MAX_TOOL_RESULT_SIZE:
+            # Keep first part, last part, and note truncation
+            first_part = result_text[:500]  # Reduced from 1500
+            last_part = result_text[-200:] if len(result_text) > 700 else ""  # Reduced from 500
+            truncated_note = f"\n\n... [RESULT TRUNCATED: {len(result_text)} chars total, saved to memory] ...\n\n"
+            display_text = first_part + truncated_note + last_part
 
-            # 3. Smart compaction check
-            stats = self.context_tracker.get_stats()
-            if stats['utilization'] > 0.8:  # 80% threshold
-                self._smart_compact(tool_name, arguments)
+        # 2. Auto-capture to vector memory (if significant) - capture FULL result
+        # Do this in background with try/except to avoid blocking
+        try:
+            self._maybe_auto_capture(tool_name, arguments, result_text)
+        except Exception:
+            pass  # Fail silently - don't block tool execution
 
-        # 4. Save work context to session state
-        if self.session_state:
-            # Create a brief summary of the result
-            result_summary = result_text[:100] + "..." if len(result_text) > 100 else result_text
-            self.session_state.save_work_context(
-                tool_name=tool_name,
-                arguments=arguments,
-                result_summary=result_summary
-            )
+        # 3. Track context size (with full result) - also non-blocking
+        try:
+            if self.context_tracker:
+                self.context_tracker.add_context(
+                    content=result_text,
+                    metadata={"tool": tool_name, "arguments": str(arguments)},
+                    item_type="tool_result"
+                )
+        except Exception:
+            pass  # Fail silently - don't block tool execution
 
-        return result
+        # 4. Save work context to session state (non-blocking)
+        try:
+            if self.session_state:
+                result_summary = display_text[:100] + "..." if len(display_text) > 100 else display_text
+                self.session_state.save_work_context(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    result_summary=result_summary
+                )
+        except Exception:
+            pass  # Fail silently - don't block tool execution
+
+        # Return truncated result to prevent conversation context overflow
+        return [TextContent(type="text", text=display_text)]
 
     def _smart_compact(self, current_tool: str, current_args: dict):
         """

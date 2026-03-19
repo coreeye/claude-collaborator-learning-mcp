@@ -41,18 +41,36 @@ class VectorStore:
         # Initialize database
         self._init_db()
 
+    # Cache at module level - check once, use forever
+    _ST_AVAILABLE = None
+    _ST_CHECKED = False
+
     def _check_embedding_available(self) -> bool:
-        """Check if sentence-transformers is available"""
+        """Check if sentence-transformers is available (cached result)"""
+        # Check class-level cache first (fastest)
+        if VectorStore._ST_CHECKED:
+            return VectorStore._ST_AVAILABLE
+
+        # Then check instance-level cache
         if self._embedding_available is not None:
             return self._embedding_available
 
+        # Only check once globally
+        VectorStore._ST_CHECKED = True
         try:
-            from sentence_transformers import SentenceTransformer
-            self._embedding_available = True
-            return True
-        except ImportError:
-            self._embedding_available = False
-            return False
+            # Just check if it can be imported, don't load the model
+            import importlib
+            spec = importlib.util.find_spec("sentence_transformers")
+            if spec is not None:
+                VectorStore._ST_AVAILABLE = True
+                self._embedding_available = True
+                return True
+        except Exception:
+            pass
+
+        VectorStore._ST_AVAILABLE = False
+        self._embedding_available = False
+        return False
 
     def _get_embedding_model(self):
         """Get or lazy-load the embedding model"""

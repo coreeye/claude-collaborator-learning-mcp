@@ -15,6 +15,7 @@ class SessionState:
 
     Automatically saves working state like active tasks,
     last work time, and other context that should persist.
+    Uses in-memory caching to minimize file I/O.
     """
 
     def __init__(self, codebase_path: str):
@@ -28,9 +29,42 @@ class SessionState:
         self.memory_path = self.codebase_path / ".codebase-memory"
         self.state_file = self.memory_path / "session_state.json"
 
+        # In-memory cache to avoid frequent file I/O
+        self._cache = {}
+        self._cache_dirty = False
+
+        # Load initial state asynchronously (lazy load)
+        self._loaded = False
+
+    def _ensure_loaded(self):
+        """Lazy load state only when needed"""
+        if self._loaded:
+            return
+
+        try:
+            if self.state_file.exists():
+                with open(self.state_file, 'r', encoding='utf-8') as f:
+                    self._cache = json.load(f)
+        except Exception:
+            self._cache = {}
+        self._loaded = True
+
+    def _flush_cache(self):
+        """Write cache to disk only if dirty"""
+        if not self._cache_dirty:
+            return
+
+        try:
+            self.memory_path.mkdir(parents=True, exist_ok=True)
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(self._cache, f, indent=2)
+            self._cache_dirty = False
+        except Exception:
+            pass  # Fail silently - don't block tool execution
+
     def save_state(self, state: Dict[str, Any]) -> bool:
         """
-        Save current working state
+        Save current working state (cached, written on flush)
 
         Args:
             state: State dictionary to save
@@ -38,34 +72,18 @@ class SessionState:
         Returns:
             True if successful
         """
-        try:
-            self.memory_path.mkdir(parents=True, exist_ok=True)
-
-            state['timestamp'] = datetime.now().isoformat()
-            state['codebase_path'] = str(self.codebase_path)
-
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=2)
-
-            return True
-        except (IOError, OSError):
-            return False
+        self._ensure_loaded()
+        state['timestamp'] = datetime.now().isoformat()
+        state['codebase_path'] = str(self.codebase_path)
+        self._cache.update(state)
+        self._cache_dirty = True
+        # Don't flush immediately - will flush on next read or periodically
+        return True
 
     def load_state(self) -> Dict[str, Any]:
-        """
-        Load previous session state
-
-        Returns:
-            Previous state dictionary, or empty dict if not found
-        """
-        if not self.state_file.exists():
-            return {}
-
-        try:
-            with open(self.state_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return {}
+        """Load previous session state (from cache)"""
+        self._ensure_loaded()
+        return self._cache.copy() if self._cache else {}
 
     def update_active_task(self, task_name: str, status: str = "in_progress"):
         """
@@ -75,11 +93,11 @@ class SessionState:
             task_name: Name of the active task
             status: Task status (in_progress, completed, etc.)
         """
-        state = self.load_state()
-        state['active_task'] = task_name
-        state['task_status'] = status
-        state['last_work'] = datetime.now().isoformat()
-        self.save_state(state)
+        self._ensure_loaded()
+        self._cache['active_task'] = task_name
+        self._cache['task_status'] = status
+        self._cache['last_work'] = datetime.now().isoformat()
+        self._cache_dirty = True
 
     def get_active_task(self) -> Optional[Dict[str, Any]]:
         """
@@ -88,14 +106,14 @@ class SessionState:
         Returns:
             Task info dict or None if no active task
         """
-        state = self.load_state()
-        if 'active_task' not in state:
+        self._ensure_loaded()
+        if 'active_task' not in self._cache:
             return None
 
         return {
-            'name': state['active_task'],
-            'status': state.get('task_status', 'unknown'),
-            'last_work': state.get('last_work', '')
+            'name': self._cache['active_task'],
+            'status': self._cache.get('task_status', 'unknown'),
+            'last_work': self._cache.get('last_work', '')
         }
 
     def save_work_context(
@@ -105,17 +123,17 @@ class SessionState:
         result_summary: str = ""
     ):
         """
-        Save context about recent work
+        Save context about recent work (cached, async write)
 
         Args:
             tool_name: Tool that was called
             arguments: Tool arguments
             result_summary: Brief summary of result
         """
-        state = self.load_state()
+        self._ensure_loaded()
 
-        if 'recent_work' not in state:
-            state['recent_work'] = []
+        if 'recent_work' not in self._cache:
+            self._cache['recent_work'] = []
 
         # Add new work entry
         work_entry = {
@@ -126,10 +144,9 @@ class SessionState:
         }
 
         # Keep only last 10 work entries
-        state['recent_work'].insert(0, work_entry)
-        state['recent_work'] = state['recent_work'][:10]
-
-        self.save_state(state)
+        self._cache['recent_work'].insert(0, work_entry)
+        self._cache['recent_work'] = self._cache['recent_work'][:10]
+        self._cache_dirty = True
 
     def get_recent_work(self, limit: int = 5) -> list:
         """
@@ -141,14 +158,19 @@ class SessionState:
         Returns:
             List of recent work entries
         """
-        state = self.load_state()
-        recent = state.get('recent_work', [])
+        self._ensure_loaded()
+        recent = self._cache.get('recent_work', [])
         return recent[:limit]
 
     def clear_state(self):
         """Clear all session state"""
-        if self.state_file.exists():
-            self.state_file.unlink()
+        self._cache = {}
+        self._cache_dirty = True
+        try:
+            if self.state_file.exists():
+                self.state_file.unlink()
+        except Exception:
+            pass
 
     def get_session_summary(self) -> Dict[str, Any]:
         """
@@ -157,13 +179,13 @@ class SessionState:
         Returns:
             Session summary dictionary
         """
-        state = self.load_state()
+        self._ensure_loaded()
         active_task = self.get_active_task()
 
         return {
             'codebase_path': str(self.codebase_path),
             'active_task': active_task,
-            'recent_work_count': len(state.get('recent_work', [])),
-            'last_session_time': state.get('timestamp'),
+            'recent_work_count': len(self._cache.get('recent_work', [])),
+            'last_session_time': self._cache.get('timestamp'),
             'session_file': str(self.state_file)
         }

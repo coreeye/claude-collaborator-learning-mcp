@@ -18,10 +18,11 @@ GLM is configured for **creativity** and **deep thinking** — it doesn't just a
 ## Features
 
 - **Persistent Memory**: Never re-explain your architecture across sessions
+- **Automatic Memory Capture**: Tool results automatically saved to semantic memory
+- **Context Management**: Smart context tracking with automatic compaction
 - **Code Analysis**: Explore any C# project instantly
 - **GLM Integration**: Offload research to another AI model
-- **Auto-Detection**: Finds your codebase automatically
-- **Zero Config**: Works with just `cwd` setting in Claude Desktop
+- **Fast Startup**: Lazy initialization prevents server startup timeout
 
 ## Installation
 
@@ -38,9 +39,9 @@ pip install -e .
 
 ## Quick Start
 
-### Simplest Configuration (Recommended)
+### Recommended Configuration (Environment Variable)
 
-Just add to Claude Desktop config - no `cwd` needed! The server can dynamically switch between codebases:
+Set the `CSHARP_CODEBASE_PATH` environment variable in your Claude Desktop config:
 
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -49,32 +50,16 @@ Just add to Claude Desktop config - no `cwd` needed! The server can dynamically 
 {
   "mcpServers": {
     "csharp": {
-      "command": "claude-collaborator"
+      "command": "claude-collaborator",
+      "env": {
+        "CSHARP_CODEBASE_PATH": "C:\\path\\to\\your\\csharp\\project"
+      }
     }
   }
 }
 ```
 
-When you want to work with a project, simply tell Claude:
-> "Switch to my backend project at C:\Projects\Backend"
-
-Claude will call `switch_codebase` and all subsequent tools work on that codebase. Each codebase maintains its own persistent memory store.
-
-### Dynamic Codebase Switching
-
-The server supports multiple codebases without reconfiguration:
-
-- **`switch_codebase(path)`** - Switch to a different repository
-- **`list_codebases(search_path?)`** - Discover available codebases
-
-```
-You: "List all my C# projects in C:\Projects"
-Claude: [calls list_codebases] "Found 3 codebases..."
-You: "Switch to the backend project"
-Claude: [calls switch_codebase] "Now working on Backend"
-```
-
-### With Config File (Optional)
+### With Config File (Alternative)
 
 Create `.claude/config.json` in your project:
 
@@ -97,19 +82,18 @@ Then in Claude Desktop:
 }
 ```
 
-### With Environment Variables (Alternative)
+### Dynamic Codebase Switching
 
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator",
-      "env": {
-        "CSHARP_CODEBASE_PATH": "C:\\path\\to\\your\\project"
-      }
-    }
-  }
-}
+You can still switch codebases during conversation:
+
+- **`switch_codebase(path)`** - Switch to a different repository
+- **`list_codebases(search_path?)`** - Discover available codebases
+
+```
+You: "List all my C# projects in C:\Projects"
+Claude: [calls list_codebases] "Found 3 codebases..."
+You: "Switch to the backend project"
+Claude: [calls switch_codebase] "Now working on Backend"
 ```
 
 ## Available Tools
@@ -119,11 +103,23 @@ Then in Claude Desktop:
 - `list_codebases` - Discover codebases (.sln/.git) in a directory
 - `get_config` - View current configuration and status
 
-### Memory
+### Automatic Memory
 - `memory_save` - Save findings for future sessions
-- `memory_search` - Search saved knowledge
+- `memory_search` - Search saved knowledge by keywords
+- `memory_semantic_search` - Search by meaning (semantic similarity)
 - `memory_get` - Retrieve a specific topic
 - `memory_status` - View memory statistics
+
+### Context Management
+- `context_retrieve` - Retrieve relevant context for a query
+- `context_offload` - Manually trigger context offload to memory
+- `context_stats` - View context tracking statistics
+
+### Session & Task Tracking
+- `session_status` - View current session state and active task
+- `task_start` - Start a new long-running task
+- `task_status` - Get task status and history
+- `task_update` - Update task with findings
 
 ### Code Analysis
 - `explore_project` - Analyze a C# project
@@ -155,7 +151,6 @@ The server looks for configuration in this priority order:
    - `.claude/config.json` (recommended)
    - `.claude-collaborator.json` (legacy)
 3. **Home config**: `~/.claude-collaborator/config.json`
-4. **Auto-detection**: Finds `.sln` or `.git` automatically
 
 ### Configuration Options
 
@@ -166,6 +161,22 @@ The server looks for configuration in this priority order:
 | `glm_model` | `glm-5` | GLM model to use |
 | `memory_path` | `.codebase-memory` | Memory storage path |
 
+### Vector Memory Settings
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `embedding_model` | `all-MiniLM-L6-v2` | Sentence transformer model |
+| `vector_db_path` | `.codebase-memory/vectors.db` | Vector database path |
+| `context_threshold` | `50000` | Chars before context offload |
+| `auto_capture_enabled` | `true` | Auto-capture tool results |
+
+### Cache Settings
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `cache_size` | `100` | Max files to cache |
+| `cache_ttl` | `3600` | Cache TTL in seconds |
+
 ### Environment Variables
 
 | Variable | Description |
@@ -174,20 +185,52 @@ The server looks for configuration in this priority order:
 | `GLM_API_KEY` | GLM API key |
 | `GLM_MODEL` | GLM model |
 | `MEMORY_PATH` | Memory storage path |
+| `EMBEDDING_MODEL` | Embedding model for semantic search |
+| `VECTOR_DB_PATH` | Vector database path |
+| `CONTEXT_THRESHOLD` | Context threshold for offload |
+| `AUTO_CAPTURE_ENABLED` | Enable auto-capture (true/false) |
+| `CACHE_SIZE` | File cache size |
+| `CACHE_TTL` | File cache TTL |
 
-## Auto-Detection
+## Automatic Memory Capture
 
-When no path is configured, the server automatically searches upward from the current directory for:
-- A `.sln` file (Visual Studio Solution)
-- A `.git` directory (Git repository root)
+The server automatically captures tool results to semantic memory when:
+- Result length exceeds 100 characters
+- Tool is in auto-capture list (e.g., `extract_class_structure`, `get_file_summary`, `find_class_usages`)
 
-This means **zero configuration** when running from within your project!
+Captured results are:
+1. Stored in vector database for semantic search
+2. Truncated in responses to manage context (1500 char limit)
+3. Available for retrieval via `context_retrieve` and `memory_semantic_search`
 
 ## Multiple Projects
 
-### Recommended: Dynamic Switching
+### Recommended: Environment Variables
 
-With dynamic switching, you only need one server:
+Configure multiple servers in Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "csharp-main": {
+      "command": "claude-collaborator",
+      "env": {
+        "CSHARP_CODEBASE_PATH": "C:\\Projects\\MainApp"
+      }
+    },
+    "csharp-tools": {
+      "command": "claude-collaborator",
+      "env": {
+        "CSHARP_CODEBASE_PATH": "C:\\Projects\\Tools"
+      }
+    }
+  }
+}
+```
+
+### Alternative: Dynamic Switching
+
+Use a single server and switch between projects:
 
 ```json
 {
@@ -202,26 +245,6 @@ With dynamic switching, you only need one server:
 Then in conversation:
 - "List my C# projects" → `list_codebases()`
 - "Switch to MainApp" → `switch_codebase(path="C:\\Projects\\MainApp")`
-- "Now switch to Tools" → `switch_codebase(path="C:\\Projects\\Tools")`
-
-### Alternative: Separate Servers
-
-You can still configure separate servers if you prefer:
-
-```json
-{
-  "mcpServers": {
-    "csharp-main": {
-      "command": "claude-collaborator",
-      "cwd": "C:\\Projects\\MainApp"
-    },
-    "csharp-tools": {
-      "command": "claude-collaborator",
-      "cwd": "C:\\Projects\\Tools"
-    }
-  }
-}
-```
 
 ## GLM Integration (Optional)
 
@@ -257,6 +280,7 @@ pip install -e ".[glm]"
 
 # Run tests
 py -m unittest tests.test_analyzer
+py tests/test_auto_memory.py
 
 # Format code
 black src/
