@@ -43,20 +43,12 @@ class ClaudeCollaboratorServer:
         # Load configuration
         self.config = load_config()
 
-        # Use provided path if explicitly given, otherwise use config
-        if codebase_path:
-            self.codebase_path = Path(codebase_path)
-        else:
-            self.codebase_path = self.config.codebase_path
+        # Component placeholders (initialized when codebase is set)
+        self.codebase_path = None
+        self.memory = None
+        self.analyzer = None
 
-        if not self.codebase_path.exists():
-            raise ValueError(f"Codebase path not found: {self.codebase_path}")
-
-        # Pass config values to components
-        self.memory = MemoryStore(str(self.codebase_path))
-        self.analyzer = CSharpCodeAnalyzer(str(self.codebase_path))
-
-        # Initialize GLM client (optional)
+        # Initialize GLM client (optional - independent of codebase)
         try:
             self.glm = GLMClient()
             self.glm_available = True
@@ -69,6 +61,121 @@ class ClaudeCollaboratorServer:
 
         # Register tools
         self._register_tools()
+
+        # Initialize codebase ONLY if explicitly provided
+        # Do NOT auto-detect from config - user must call switch_codebase
+        if codebase_path:
+            self.switch_codebase(codebase_path)
+        # Otherwise start uninitialized - user must call switch_codebase
+
+    def _initialize_codebase(self, path: Path):
+        """Initialize analyzer and memory store for a codebase path"""
+        if not path.exists():
+            raise ValueError(f"Codebase path not found: {path}")
+
+        self.codebase_path = path
+        self.memory = MemoryStore(str(path))
+        self.analyzer = CSharpCodeAnalyzer(str(path))
+
+    def switch_codebase(self, path: str) -> dict:
+        """
+        Switch to a different codebase.
+
+        Args:
+            path: Path to the new codebase root
+
+        Returns:
+            dict with status and info about the new codebase
+        """
+        new_path = Path(path)
+
+        # If relative, resolve from current working directory
+        if not new_path.is_absolute():
+            new_path = Path.cwd() / new_path
+
+        # Validate path exists
+        if not new_path.exists():
+            return {
+                "success": False,
+                "error": f"Path not found: {new_path}"
+            }
+
+        # Reinitialize components
+        self._initialize_codebase(new_path)
+
+        # Gather info about the new codebase
+        cs_files = list(new_path.rglob("*.cs"))
+        sln_files = list(new_path.glob("*.sln"))
+        csproj_files = list(new_path.rglob("*.csproj"))
+
+        return {
+            "success": True,
+            "codebase_path": str(new_path),
+            "cs_files_count": len(cs_files),
+            "solutions": [f.name for f in sln_files],
+            "projects_count": len(csproj_files),
+            "memory_path": str(self.memory.memory_path)
+        }
+
+    def list_codebases(self, search_path: str = None) -> dict:
+        """
+        Search for codebases in a directory.
+
+        Args:
+            search_path: Directory to search (default: current working directory)
+
+        Returns:
+            dict with list of discovered codebases
+        """
+        if search_path:
+            search_dir = Path(search_path)
+        else:
+            search_dir = Path.cwd()
+
+        if not search_dir.exists():
+            return {"success": False, "error": f"Search path not found: {search_dir}"}
+
+        codebases = []
+
+        # Search for .sln files (Visual Studio solutions)
+        for sln in search_dir.rglob("*.sln"):
+            root = sln.parent
+            codebases.append({
+                "type": "solution",
+                "name": sln.stem,
+                "root": str(root),
+                "file": str(sln)
+            })
+
+        # Search for .git directories (git repos)
+        for git in search_dir.rglob(".git"):
+            if git.is_dir():
+                root = git.parent
+                # Skip if we already have this root from a .sln
+                if not any(cb["root"] == str(root) for cb in codebases):
+                    codebases.append({
+                        "type": "git",
+                        "name": root.name,
+                        "root": str(root),
+                        "file": str(git)
+                    })
+
+        return {
+            "success": True,
+            "search_path": str(search_dir),
+            "codebases_count": len(codebases),
+            "codebases": codebases
+        }
+
+    def _check_initialized(self) -> tuple[bool, str]:
+        """Check if codebase is initialized. Returns (is_ready, error_message)"""
+        if self.codebase_path is None:
+            return False, (
+                "No codebase selected. Use `switch_codebase` to select a codebase first.\n"
+                "Example: switch_codebase(path=\"C:\\\\path\\\\to\\\\your\\\\project\")\n"
+                "Or use `list_codebases` to discover available codebases."
+            )
+        return True, None
 
     def _truncate_for_glm(self, content: str, max_chars: int = None) -> str:
         """Truncate content to avoid GLM context errors"""
@@ -91,6 +198,34 @@ class ClaudeCollaboratorServer:
                     inputSchema={
                         "type": "object",
                         "properties": {},
+                        "required": []
+                    }
+                ),
+                Tool(
+                    name="switch_codebase",
+                    description="Switch to a different codebase. Use this to work with multiple repositories.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the codebase root (can be absolute or relative)"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                ),
+                Tool(
+                    name="list_codebases",
+                    description="Discover codebases by searching for .sln files and .git directories",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "search_path": {
+                                "type": "string",
+                                "description": "Directory to search (default: current working directory)"
+                            }
+                        },
                         "required": []
                     }
                 ),
@@ -581,12 +716,51 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
             try:
                 # ==================== CONFIGURATION ====================
                 if name == "get_config":
-                    return [TextContent(type="text", text=json.dumps({
-                        "codebase_path": str(self.codebase_path),
+                    config_data = {
                         "glm_available": self.glm_available,
-                        "memory_path": str(self.memory.memory_path),
                         "language": "C#"
-                    }, indent=2))]
+                    }
+                    if self.codebase_path:
+                        config_data["codebase_path"] = str(self.codebase_path)
+                        config_data["memory_path"] = str(self.memory.memory_path) if self.memory else None
+                        config_data["initialized"] = True
+                    else:
+                        config_data["initialized"] = False
+                        config_data["message"] = "No codebase selected. Use switch_codebase() to select one."
+                    return [TextContent(type="text", text=json.dumps(config_data, indent=2))]
+
+                elif name == "switch_codebase":
+                    result = self.switch_codebase(arguments["path"])
+                    if result["success"]:
+                        output = f"**Switched to codebase:**\n"
+                        output += f"- Path: {result['codebase_path']}\n"
+                        output += f"- C# files: {result['cs_files_count']}\n"
+                        output += f"- Projects: {result['projects_count']}\n"
+                        if result['solutions']:
+                            output += f"- Solutions: {', '.join(result['solutions'])}\n"
+                        output += f"- Memory: {result['memory_path']}\n"
+                        return [TextContent(type="text", text=output)]
+                    else:
+                        return [TextContent(type="text", text=f"Error: {result['error']}")]
+
+                elif name == "list_codebases":
+                    search_path = arguments.get("search_path")
+                    result = self.list_codebases(search_path)
+                    if not result["success"]:
+                        return [TextContent(type="text", text=f"Error: {result['error']}")]
+
+                    output = f"**Found {result['codebases_count']} codebase(s)** in: {result['search_path']}\n\n"
+                    for i, cb in enumerate(result["codebases"], 1):
+                        output += f"{i}. **{cb['name']}** ({cb['type']})\n"
+                        output += f"   Path: `{cb['root']}`\n"
+                        output += f"   Switch with: `switch_codebase(path=\"{cb['root']}\")`\n\n"
+                    return [TextContent(type="text", text=output)]
+
+                # ==================== CHECK INITIALIZATION ====================
+                # All tools below require a codebase to be initialized
+                is_ready, error_msg = self._check_initialized()
+                if not is_ready:
+                    return [TextContent(type="text", text=error_msg)]
 
                 # ==================== MEMORY TOOLS ====================
                 elif name == "memory_save":

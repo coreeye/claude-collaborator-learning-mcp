@@ -1,6 +1,26 @@
 # Configuration Guide
 
-The claude-collaborator server supports flexible configuration through multiple sources.
+The claude-collaborator server supports flexible configuration through multiple sources, including **dynamic codebase switching** for working with multiple repositories.
+
+## Dynamic Codebase Switching (Recommended)
+
+The server can now switch between codebases on-the-fly without reconfiguration:
+
+```json
+{
+  "mcpServers": {
+    "csharp": {
+      "command": "claude-collaborator"
+    }
+  }
+}
+```
+
+Then simply tell Claude which codebase to work with:
+- "Switch to my backend project" → Claude calls `switch_codebase`
+- "List all C# projects in C:\Projects" → Claude calls `list_codebases`
+
+**No `cwd` needed!** The server starts uninitialized and you switch to repos as needed. Each codebase gets its own persistent memory store (stored at `{codebase_path}/.codebase-memory`).
 
 ## Configuration Priority
 
@@ -95,9 +115,49 @@ When `codebase_path` is not explicitly set, the server automatically detects it 
 
 This means **no configuration is needed** when running the server from within your project!
 
+## New Tools for Dynamic Switching
+
+### `switch_codebase(path)`
+Switch to a different codebase during conversation.
+
+```python
+switch_codebase(path="C:\\Projects\\MyBackend")
+```
+
+### `list_codebases(search_path?)`
+Discover all codebases in a directory.
+
+```python
+list_codebases(search_path="C:\\Projects")
+# Returns: List of .sln files and .git repos found
+```
+
 ## Claude Desktop Configuration
 
-### Method 1: Using `cwd` (Recommended - No Config File Needed!)
+### Method 1: Dynamic Switching (Recommended - Simplest!)
+
+Works with multiple codebases, no reconfiguration needed:
+
+```json
+{
+  "mcpServers": {
+    "csharp": {
+      "command": "claude-collaborator"
+    }
+  }
+}
+```
+
+Then in conversation:
+```
+You: "List my C# projects"
+Claude: [calls list_codebases] → Shows all repos
+
+You: "Switch to backend project"
+Claude: [calls switch_codebase] → Now working on backend
+```
+
+### Method 2: Using `cwd` (Auto-Detect from Directory)
 
 ```json
 {
@@ -110,23 +170,9 @@ This means **no configuration is needed** when running the server from within yo
 }
 ```
 
-### Method 2: Using Environment Variables
+The server auto-detects the codebase from the `cwd` directory.
 
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator",
-      "env": {
-        "CSHARP_CODEBASE_PATH": "C:\\Projects\\MyCSharpProject",
-        "GLM_API_KEY": "your_api_key"
-      }
-    }
-  }
-}
-```
-
-### Method 3: Using Config File
+### Method 3: Using Environment Variables
 
 Create `.claude/config.json` in your project:
 
@@ -152,7 +198,27 @@ Then in Claude Desktop config:
 
 ## Multiple Projects
 
-Configure separate servers for different codebases:
+### Recommended: Dynamic Switching
+
+One server handles multiple codebases:
+
+```json
+{
+  "mcpServers": {
+    "csharp": {
+      "command": "claude-collaborator"
+    }
+  }
+}
+```
+
+Use the new tools to switch between repos:
+- `list_codebases(search_path)` - Discover available repos
+- `switch_codebase(path)` - Switch to a specific repo
+
+### Alternative: Separate Servers
+
+Configure multiple servers if you prefer:
 
 ```json
 {

@@ -40,7 +40,7 @@ pip install -e .
 
 ### Simplest Configuration (Recommended)
 
-Just add to Claude Desktop config using the `cwd` field:
+Just add to Claude Desktop config - no `cwd` needed! The server can dynamically switch between codebases:
 
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -49,16 +49,32 @@ Just add to Claude Desktop config using the `cwd` field:
 {
   "mcpServers": {
     "csharp": {
-      "command": "claude-collaborator",
-      "cwd": "C:\\path\\to\\your\\csharp\\project"
+      "command": "claude-collaborator"
     }
   }
 }
 ```
 
-That's it! The server auto-detects your codebase from the `cwd` directory.
+When you want to work with a project, simply tell Claude:
+> "Switch to my backend project at C:\Projects\Backend"
 
-### With Config File
+Claude will call `switch_codebase` and all subsequent tools work on that codebase. Each codebase maintains its own persistent memory store.
+
+### Dynamic Codebase Switching
+
+The server supports multiple codebases without reconfiguration:
+
+- **`switch_codebase(path)`** - Switch to a different repository
+- **`list_codebases(search_path?)`** - Discover available codebases
+
+```
+You: "List all my C# projects in C:\Projects"
+Claude: [calls list_codebases] "Found 3 codebases..."
+You: "Switch to the backend project"
+Claude: [calls switch_codebase] "Now working on Backend"
+```
+
+### With Config File (Optional)
 
 Create `.claude/config.json` in your project:
 
@@ -98,11 +114,37 @@ Then in Claude Desktop:
 
 ## Available Tools
 
-- `explore_project` - Analyze a C# project
-- `analyze_architecture` - Get overview of all projects
+### Codebase Management
+- `switch_codebase` - Switch to a different codebase dynamically
+- `list_codebases` - Discover codebases (.sln/.git) in a directory
+- `get_config` - View current configuration and status
+
+### Memory
 - `memory_save` - Save findings for future sessions
 - `memory_search` - Search saved knowledge
-- `glm_explore` - Ask GLM questions (requires API key)
+- `memory_get` - Retrieve a specific topic
+- `memory_status` - View memory statistics
+
+### Code Analysis
+- `explore_project` - Analyze a C# project
+- `analyze_architecture` - Get overview of all projects
+- `extract_class_structure` - Parse class structure
+- `get_file_summary` - Get file statistics
+- `find_similar_code` - Find code patterns
+- `lookup_convention` - Lookup coding conventions
+
+### Navigation
+- `get_callers` - Find code that calls a method/class
+- `find_class_usages` - Find all usages of a class
+- `find_implementations` - Find interface implementations
+- `find_references` - Find member references
+- `list_dependencies` - Map file/project dependencies
+
+### GLM Integration (requires API key)
+- `glm_explore` - Ask GLM questions for alternative perspectives
+- `summarize_large_file` - GLM summarizes large files
+- `get_alternative` - Get alternative approaches from GLM
+- `risk_check` - GLM identifies potential risks
 
 ## Configuration
 
@@ -143,7 +185,28 @@ This means **zero configuration** when running from within your project!
 
 ## Multiple Projects
 
-Configure separate servers for different codebases:
+### Recommended: Dynamic Switching
+
+With dynamic switching, you only need one server:
+
+```json
+{
+  "mcpServers": {
+    "csharp": {
+      "command": "claude-collaborator"
+    }
+  }
+}
+```
+
+Then in conversation:
+- "List my C# projects" → `list_codebases()`
+- "Switch to MainApp" → `switch_codebase(path="C:\\Projects\\MainApp")`
+- "Now switch to Tools" → `switch_codebase(path="C:\\Projects\\Tools")`
+
+### Alternative: Separate Servers
+
+You can still configure separate servers if you prefer:
 
 ```json
 {
