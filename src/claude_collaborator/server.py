@@ -35,6 +35,8 @@ try:
     from claude_collaborator.memory_vector import VectorStore
     from claude_collaborator.memory_auto import AutoCapture
     from claude_collaborator.memory_context import ContextTracker
+    from claude_collaborator.memory_cache import FileCache
+    from claude_collaborator.memory_session import SessionState
     VECTOR_MEMORY_AVAILABLE = True
 except ImportError:
     VECTOR_MEMORY_AVAILABLE = False
@@ -62,6 +64,11 @@ class ClaudeCollaboratorServer:
         self.vector_store = None
         self.auto_capture = None
         self.context_tracker = None
+        self.file_cache = None
+        self.session_state = None
+
+        # Automatic context retrieval (stored for tool access)
+        self._current_retrieved_context = None
 
         # Initialize GLM client (optional - independent of codebase)
         try:
@@ -106,12 +113,30 @@ class ClaudeCollaboratorServer:
                     self.vector_store,
                     threshold_chars=context_threshold
                 )
+
+                # Initialize file cache
+                cache_size = self.config.get("cache_size", 100)
+                cache_ttl = self.config.get("cache_ttl", 3600)
+                self.file_cache = FileCache(
+                    self.vector_store,
+                    max_entries=cache_size,
+                    default_ttl=cache_ttl
+                )
+
+                # Initialize session state
+                self.session_state = SessionState(str(path))
+
             except Exception as e:
                 # Graceful fallback if vector memory fails to initialize
                 print(f"Warning: Vector memory initialization failed: {e}")
                 self.vector_store = None
                 self.auto_capture = None
                 self.context_tracker = None
+                self.file_cache = None
+                self.session_state = None
+        else:
+            self.file_cache = None
+            self.session_state = None
 
     def switch_codebase(self, path: str) -> dict:
         """
@@ -226,6 +251,165 @@ class ClaudeCollaboratorServer:
             captured_id = self.auto_capture.capture_tool_result(tool_name, arguments, result)
             return captured_id
         return None
+
+    # ==================== AUTOMATIC MEMORY & CONTEXT MANAGEMENT ====================
+
+    def _auto_retrieve_context(self, tool_name: str, arguments: dict) -> Optional[str]:
+        """
+        Automatically retrieve relevant memories before tool execution.
+
+        Args:
+            tool_name: Name of the tool being called
+            arguments: Tool arguments
+
+        Returns:
+            Formatted context string or None
+        """
+        if not self.vector_store:
+            return None
+
+        if not self.vector_store._check_embedding_available():
+            return None
+
+        # Build query from tool name and key arguments
+        query_parts = [tool_name]
+
+        # Extract meaningful arguments for query
+        for key in ["pattern", "topic", "file_path", "class_name", "target", "project", "query", "interface_name"]:
+            if key in arguments and arguments[key]:
+                query_parts.append(str(arguments[key]))
+
+        query = " ".join(query_parts)
+
+        # Retrieve relevant memories
+        try:
+            results = self.vector_store.search(query, limit=3)
+
+            if not results:
+                return None
+
+            # Format as context
+            context_lines = ["**Relevant Memory:**"]
+            for r in results:
+                # Truncate content for display
+                content_preview = r['content'][:150] + "..." if len(r['content']) > 150 else r['content']
+                context_lines.append(f"- {r['topic']}: {content_preview}")
+
+            return "\n".join(context_lines)
+        except Exception:
+            return None
+
+    def _process_tool_result(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: list[TextContent]
+    ) -> list[TextContent]:
+        """
+        Post-process tool result: capture, track context, check compaction.
+        Runs AFTER every tool completion.
+
+        Args:
+            tool_name: Name of the tool that was called
+            arguments: Tool arguments
+            result: Tool result to process
+
+        Returns:
+            Processed result (possibly with context added)
+        """
+        if not result or len(result) == 0:
+            return result
+
+        # Extract text content
+        result_text = result[0].text if hasattr(result[0], 'text') else str(result[0])
+
+        # 1. Auto-capture to vector memory (if significant)
+        self._maybe_auto_capture(tool_name, arguments, result_text)
+
+        # 2. Track context size
+        if self.context_tracker:
+            self.context_tracker.add_context(
+                content=result_text,
+                metadata={"tool": tool_name, "arguments": str(arguments)},
+                item_type="tool_result"
+            )
+
+            # 3. Smart compaction check
+            stats = self.context_tracker.get_stats()
+            if stats['utilization'] > 0.8:  # 80% threshold
+                self._smart_compact(tool_name, arguments)
+
+        # 4. Save work context to session state
+        if self.session_state:
+            # Create a brief summary of the result
+            result_summary = result_text[:100] + "..." if len(result_text) > 100 else result_text
+            self.session_state.save_work_context(
+                tool_name=tool_name,
+                arguments=arguments,
+                result_summary=result_summary
+            )
+
+        return result
+
+    def _smart_compact(self, current_tool: str, current_args: dict):
+        """
+        Intelligently compact context when approaching limits.
+
+        Strategies (in order):
+        1. Semantic offload - move low-relevance items to vector store
+        2. Summarize large items - compress bulk context
+        3. Clear old items - remove very old context
+
+        Args:
+            current_tool: Currently executing tool (for relevance scoring)
+            current_args: Current tool arguments (for relevance scoring)
+        """
+        if not self.context_tracker or not self.vector_store:
+            return
+
+        stats = self.context_tracker.get_stats()
+        utilization = stats['utilization']
+
+        # Build query for relevance scoring
+        query_parts = [current_tool]
+        if 'pattern' in current_args:
+            query_parts.append(current_args['pattern'])
+        if 'topic' in current_args:
+            query_parts.append(current_args['topic'])
+        if 'query' in current_args:
+            query_parts.append(current_args['query'])
+        if 'file_path' in current_args:
+            query_parts.append(current_args['file_path'])
+        query = " ".join(query_parts)
+
+        # Strategy 1: Offload low-relevance items (utilization > 80%)
+        if utilization > 0.8:
+            try:
+                self.context_tracker._trigger_offload(current_query=query)
+            except Exception:
+                pass  # Fail silently, don't break tool execution
+
+        # Strategy 2: Summarize large individual items (utilization > 90%)
+        if utilization > 0.9:
+            self._summarize_large_context_items()
+
+        # Strategy 3: Clear very old items (utilization > 95%)
+        if utilization > 0.95:
+            self.context_tracker.clear_old(age_seconds=1800)  # 30 minutes
+
+    def _summarize_large_context_items(self):
+        """Summarize context items that are too large"""
+        if not self.context_tracker:
+            return
+
+        for item in self.context_tracker.context_items:
+            if len(item.content) > 2000:
+                # Truncate with summary marker
+                item.content = (
+                    item.content[:500] +
+                    f"\n\n... [SUMMARIZED: {len(item.content)} chars total] ...\n\n" +
+                    item.content[-500:]
+                )
 
     def _register_tools(self):
         """Register all MCP tools"""
@@ -372,6 +556,15 @@ class ClaudeCollaboratorServer:
                 Tool(
                     name="context_stats",
                     description="Get context tracking statistics including size, utilization, and item counts",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                ),
+                Tool(
+                    name="session_status",
+                    description="Get session state including active task and recent work",
                     inputSchema={
                         "type": "object",
                         "properties": {},
@@ -816,6 +1009,11 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
         async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             """Handle tool calls"""
             try:
+                # ==================== AUTOMATIC PRE-TOOL CONTEXT RETRIEVAL ====================
+                # Automatically retrieve relevant memories before tool execution
+                retrieved_context = self._auto_retrieve_context(name, arguments)
+                self._current_retrieved_context = retrieved_context
+
                 # ==================== CONFIGURATION ====================
                 if name == "get_config":
                     config_data = {
@@ -829,7 +1027,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                     else:
                         config_data["initialized"] = False
                         config_data["message"] = "No codebase selected. Use switch_codebase() to select one."
-                    return [TextContent(type="text", text=json.dumps(config_data, indent=2))]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=json.dumps(config_data, indent=2))])
 
                 elif name == "switch_codebase":
                     result = self.switch_codebase(arguments["path"])
@@ -841,28 +1039,28 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         if result['solutions']:
                             output += f"- Solutions: {', '.join(result['solutions'])}\n"
                         output += f"- Memory: {result['memory_path']}\n"
-                        return [TextContent(type="text", text=output)]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
                     else:
-                        return [TextContent(type="text", text=f"Error: {result['error']}")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Error: {result['error']}")])
 
                 elif name == "list_codebases":
                     search_path = arguments.get("search_path")
                     result = self.list_codebases(search_path)
                     if not result["success"]:
-                        return [TextContent(type="text", text=f"Error: {result['error']}")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Error: {result['error']}")])
 
                     output = f"**Found {result['codebases_count']} codebase(s)** in: {result['search_path']}\n\n"
                     for i, cb in enumerate(result["codebases"], 1):
                         output += f"{i}. **{cb['name']}** ({cb['type']})\n"
                         output += f"   Path: `{cb['root']}`\n"
                         output += f"   Switch with: `switch_codebase(path=\"{cb['root']}\")`\n\n"
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 # ==================== CHECK INITIALIZATION ====================
                 # All tools below require a codebase to be initialized
                 is_ready, error_msg = self._check_initialized()
                 if not is_ready:
-                    return [TextContent(type="text", text=error_msg)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=error_msg)])
 
                 # ==================== MEMORY TOOLS ====================
                 elif name == "memory_save":
@@ -872,7 +1070,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         category=arguments.get("category", "findings"),
                         metadata={"timestamp": datetime.now().isoformat()}
                     )
-                    return [TextContent(type="text", text=f"Saved to memory: {result}")]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Saved to memory: {result}")])
 
                 elif name == "memory_get":
                     result = self.memory.get_topic(
@@ -880,20 +1078,20 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         category=arguments.get("category")
                     )
                     if result:
-                        return [TextContent(type="text", text=result["content"])]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=result["content"])])
                     else:
-                        return [TextContent(type="text", text=f"Topic '{arguments['topic']}' not found in memory")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Topic '{arguments['topic']}' not found in memory")])
 
                 elif name == "memory_search":
                     results = self.memory.search(arguments["query"])
                     if not results:
-                        return [TextContent(type="text", text=f"No results found for '{arguments['query']}'")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"No results found for '{arguments['query']}'")])
 
                     output = f"Found {len(results)} results:\n\n"
                     for r in results:
                         output += f"## {r['topic']} ({r['category']})\n"
                         output += f"{r['snippet']}\n\n"
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "memory_status":
                     status = self.memory.get_status()
@@ -905,12 +1103,12 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
 - Topics by Category:"""
                     for cat, count in status['topics_by_category'].items():
                         output += f"\n  - {cat}: {count}"
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 # ==================== SEMANTIC MEMORY TOOLS ====================
                 elif name == "memory_semantic_search":
                     if not self.vector_store:
-                        return [TextContent(type="text", text="Semantic search not available. Install with: pip install -e '.[vector]'")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="Semantic search not available. Install with: pip install -e '.[vector]'")])
 
                     query = arguments["query"]
                     limit = arguments.get("limit", 5)
@@ -919,7 +1117,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                     results = self.vector_store.search(query, limit=limit, category=category)
 
                     if not results:
-                        return [TextContent(type="text", text=f"No semantic matches found for '{query}'")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"No semantic matches found for '{query}'")])
 
                     output = f"## Semantic Search Results: '{query}'\n\n"
                     for i, r in enumerate(results, 1):
@@ -927,11 +1125,11 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         output += f"**Relevance:** {r['score']:.2f}\n\n"
                         snippet = r['content'][:300] + "..." if len(r['content']) > 300 else r['content']
                         output += f"{snippet}\n\n"
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "memory_vector_stats":
                     if not self.vector_store:
-                        return [TextContent(type="text", text="Vector memory not available. Install with: pip install -e '.[vector]'")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="Vector memory not available. Install with: pip install -e '.[vector]'")])
 
                     stats = self.vector_store.get_stats()
                     output = f"""Vector Memory Status:
@@ -942,11 +1140,11 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
 - Entries by Category:"""
                     for cat, count in stats['categories'].items():
                         output += f"\n  - {cat}: {count}"
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "context_offload":
                     if not self.context_tracker:
-                        return [TextContent(type="text", text="Context tracking not available. Install with: pip install -e '.[vector]'")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="Context tracking not available. Install with: pip install -e '.[vector]'")])
 
                     current_query = arguments.get("current_query", "")
                     result = self.context_tracker._trigger_offload(current_query)
@@ -955,11 +1153,11 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                     output += f"- Offloaded {result['offloaded_count']} items\n"
                     output += f"- Offloaded size: {result['offloaded_size']} chars\n"
                     output += f"- Remaining size: {result['remaining_size']} chars\n"
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "context_retrieve":
                     if not self.context_tracker:
-                        return [TextContent(type="text", text="Context tracking not available. Install with: pip install -e '.[vector]'")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="Context tracking not available. Install with: pip install -e '.[vector]'")])
 
                     query = arguments["query"]
                     limit = arguments.get("limit", 3)
@@ -972,11 +1170,11 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         if 'score' in r:
                             output += f"**Relevance:** {r['score']:.2f}\n\n"
                         output += f"{r.get('content', '')[:300]}\n\n"
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "context_stats":
                     if not self.context_tracker:
-                        return [TextContent(type="text", text="Context tracking not available. Install with: pip install -e '.[vector]'")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="Context tracking not available. Install with: pip install -e '.[vector]'")])
 
                     stats = self.context_tracker.get_stats()
                     output = f"""Context Tracking Status:
@@ -988,7 +1186,37 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
 - Items by Type:"""
                     for item_type, count in stats['items_by_type'].items():
                         output += f"\n  - {item_type}: {count}"
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
+
+                elif name == "session_status":
+                    if not self.session_state:
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="Session state not available.")])
+
+                    summary = self.session_state.get_session_summary()
+                    recent_work = self.session_state.get_recent_work(limit=5)
+
+                    output = f"""Session Status:
+- Codebase: {summary['codebase_path']}
+- Session File: {summary.get('session_file', 'N/A')}
+- Last Session: {summary.get('last_session_time', 'N/A')}"""
+
+                    active_task = summary.get('active_task')
+                    if active_task:
+                        output += f"\n- Active Task: {active_task['name']} ({active_task['status']})"
+                        output += f"\n- Last Work: {active_task.get('last_work', 'N/A')}"
+
+                    output += f"\n- Recent Work Entries: {summary.get('recent_work_count', 0)}"
+
+                    if recent_work:
+                        output += "\n\n**Recent Work:**\n"
+                        for i, work in enumerate(recent_work, 1):
+                            output += f"{i}. {work['tool']}"
+                            if 'arguments' in work:
+                                args_str = str(work['arguments'])[:50]
+                                output += f" ({args_str}...)"
+                            output += f" - {work.get('timestamp', 'N/A')}\n"
+
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 # ==================== CONTEXT GATHERER TOOLS ====================
                 elif name == "find_similar_code":
@@ -1009,7 +1237,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         output += "\n"
 
                     output += "\n**YOU (Claude)** should analyze these examples and decide how to proceed."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "lookup_convention":
                     topic = arguments["topic"]
@@ -1035,7 +1263,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                             output += "\n"
 
                     output += "\n**YOU (Claude)** should analyze these conventions and decide whether to follow them."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "get_callers":
                     target = arguments["target"]
@@ -1074,7 +1302,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                             output += f"... and {len(callers) - 20} more\n"
 
                     output += "\n**YOU (Claude)** should analyze these callers to understand impact."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "find_class_usages":
                     class_name = arguments["class_name"]
@@ -1096,7 +1324,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         output += f"... and {len(result['by_file']) - 10} more files\n"
 
                     output += "\n**YOU (Claude)** should analyze these usages to understand dependencies."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "find_implementations":
                     interface_name = arguments["interface_name"]
@@ -1115,7 +1343,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                             output += "\n\n"
 
                     output += "\n**YOU (Claude)** should compare these implementations and recommend patterns."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 # ==================== CODE ANALYSIS TOOLS ====================
                 elif name == "extract_class_structure":
@@ -1123,7 +1351,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                     include_body = arguments.get("include_body", False)
 
                     if not file_path.exists():
-                        return [TextContent(type="text", text=f"File not found: {arguments['file_path']}")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"File not found: {arguments['file_path']}")])
 
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
@@ -1205,13 +1433,13 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         output += "\n"
 
                     output += "\n**YOU (Claude)** should analyze this structure to understand relationships."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "get_file_summary":
                     file_path = self.codebase_path / arguments["file_path"]
 
                     if not file_path.exists():
-                        return [TextContent(type="text", text=f"File not found: {arguments['file_path']}")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"File not found: {arguments['file_path']}")])
 
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
@@ -1255,7 +1483,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                     output += f"**Complexity:** {complexity}\n\n"
 
                     output += "\n**YOU (Claude)** should decide if this file needs deeper analysis."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "list_dependencies":
                     target = arguments["target"]
@@ -1309,7 +1537,7 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                             output += f"Project '{target}' not found.\n"
 
                     output += "\n**YOU (Claude)** should analyze dependencies to understand coupling."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "find_references":
                     member_name = arguments["member_name"]
@@ -1357,18 +1585,18 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                         output += f"... and {len(by_file) - 10} more files\n"
 
                     output += "\n**YOU (Claude)** should use this to plan safe refactoring."
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 # ==================== GLM WORKER TOOLS ====================
                 elif name == "summarize_large_file":
                     if not self.glm_available:
-                        return [TextContent(type="text", text="GLM API key not configured. Add GLM_API_KEY to environment variables or .env file.")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="GLM API key not configured. Add GLM_API_KEY to environment variables or .env file.")])
 
                     file_path = self.codebase_path / arguments["file_path"]
                     focus = arguments.get("focus", "")
 
                     if not file_path.exists():
-                        return [TextContent(type="text", text=f"File not found: {arguments['file_path']}")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"File not found: {arguments['file_path']}")])
 
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
@@ -1398,11 +1626,11 @@ Provide:
                         max_tokens=2048
                     )
 
-                    return [TextContent(type="text", text=f"**GLM Summary:**\n\n{result}")]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"**GLM Summary:**\n\n{result}")])
 
                 elif name == "get_alternative":
                     if not self.glm_available:
-                        return [TextContent(type="text", text="GLM API key not configured.")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="GLM API key not configured.")])
 
                     your_approach = arguments["your_approach"]
                     context = arguments.get("context", "")
@@ -1426,11 +1654,11 @@ Can you suggest an alternative approach? Keep it practical and concise."""
                     # Auto-capture to vector memory
                     self._maybe_auto_capture(name, arguments, output)
 
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 elif name == "risk_check":
                     if not self.glm_available:
-                        return [TextContent(type="text", text="GLM API key not configured.")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="GLM API key not configured.")])
 
                     proposed_change = arguments["proposed_change"]
                     code = arguments.get("code", "")
@@ -1454,14 +1682,14 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
                     # Auto-capture to vector memory
                     self._maybe_auto_capture(name, arguments, output)
 
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 # ==================== PROJECT-LEVEL TOOLS ====================
                 elif name == "explore_project":
                     result = self.analyzer.analyze_project(arguments["project"])
 
                     if "error" in result:
-                        return [TextContent(type="text", text=result["error"])]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=result["error"])])
 
                     summary = f"""# {result['project_name']} Project Summary
 
@@ -1491,7 +1719,7 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
                     # Auto-capture to vector memory
                     self._maybe_auto_capture(name, arguments, summary)
 
-                    return [TextContent(type="text", text=summary)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=summary)])
 
                 elif name == "analyze_architecture":
                     result = self.analyzer.analyze_architecture()
@@ -1519,7 +1747,7 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
                     # Auto-capture to vector memory
                     self._maybe_auto_capture(name, arguments, output)
 
-                    return [TextContent(type="text", text=output)]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 # ==================== TASK TOOLS ====================
                 elif name == "task_start":
@@ -1539,13 +1767,13 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
                         category=f"tasks/active"
                     )
 
-                    return [TextContent(type="text", text=f"Task '{arguments['name']}' started. Use task_update to add progress.")]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Task '{arguments['name']}' started. Use task_update to add progress.")])
 
                 elif name == "task_update":
                     existing = self.memory.get_topic(arguments['name'], category="tasks/active")
 
                     if not existing:
-                        return [TextContent(type="text", text=f"Task '{arguments['name']}' not found. Use task_start first.")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Task '{arguments['name']}' not found. Use task_start first.")])
 
                     updated_content = existing['content'] + f"\n### Update {datetime.now().isoformat()}\n\n{arguments['content']}\n"
 
@@ -1555,22 +1783,22 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
                         category="tasks/active"
                     )
 
-                    return [TextContent(type="text", text=f"Task '{arguments['name']}' updated.")]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Task '{arguments['name']}' updated.")])
 
                 elif name == "task_status":
                     result = self.memory.get_topic(arguments['name'], category="tasks/active")
 
                     if result:
-                        return [TextContent(type="text", text=result['content'])]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=result['content'])])
                     else:
-                        return [TextContent(type="text", text=f"Task '{arguments['name']}' not found.")]
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Task '{arguments['name']}' not found.")])
 
                 else:
-                    return [TextContent(type="text", text=f"Unknown tool: {name}")]
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Unknown tool: {name}")])
 
             except Exception as e:
                 import traceback
-                return [TextContent(type="text", text=f"Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}")]
+                return self._process_tool_result(name, arguments, [TextContent(type="text", text=f"Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}")])
 
     async def run(self):
         """Run the MCP server"""

@@ -27,6 +27,11 @@ class AutoCapture:
         "get_alternative": "decisions",
         "risk_check": "decisions",
         "lookup_convention": "patterns",
+        "extract_class_structure": "code",
+        "get_file_summary": "code",
+        "find_class_usages": "code",
+        "find_implementations": "code",
+        "get_callers": "code",
     }
 
     # Pattern detection keywords
@@ -74,6 +79,8 @@ class AutoCapture:
         """
         Auto-capture if tool result is significant
 
+        Enhanced to capture more automatically with pattern detection.
+
         Args:
             tool_name: Name of the tool that was called
             arguments: Tool arguments
@@ -92,11 +99,15 @@ class AutoCapture:
         if tool_name not in self.AUTO_CAPTURE_TOOLS:
             return None
 
-        # Check if result is substantial enough
-        if len(result) < 200:
+        # Check if result is substantial enough (lowered from 200 to 100)
+        if len(result) < 100:
             return None
 
-        # Determine category and topic
+        # Skip if it's an error message
+        if result.startswith("Error:") or result.startswith("Warning:"):
+            return None
+
+        # Determine category from tool name
         category = self.AUTO_CAPTURE_TOOLS[tool_name]
 
         # Generate topic from tool name and arguments
@@ -119,13 +130,32 @@ class AutoCapture:
         )
 
         # Also store in structured memory for certain categories
-        if category in ("architecture", "decisions"):
+        if category in ("architecture", "decisions", "patterns"):
             self.memory_store.save_finding(
                 topic=topic,
                 content=f"# {topic}\n\n{result[:2000]}...",  # Truncate for markdown
                 category=category,
                 metadata=metadata
             )
+
+        # Also detect patterns in the result itself and capture them
+        detected = self.detect_patterns_in_text(result)
+        for detection in detected:
+            if detection['type'] == 'decision':
+                self.capture_decision(
+                    decision=f"{tool_name}: {detection['context'][:100]}",
+                    context=result[:500],
+                    alternatives=[]
+                )
+            elif detection['type'] == 'pattern':
+                # Extract pattern type from context
+                pattern_type = detection.get('keyword', 'unknown')
+                self.capture_pattern(
+                    pattern_type=pattern_type,
+                    description=detection['context'][:200],
+                    files=[arguments.get('file_path', arguments.get('target', 'unknown'))],
+                    code_snippet=""
+                )
 
         return vector_id
 

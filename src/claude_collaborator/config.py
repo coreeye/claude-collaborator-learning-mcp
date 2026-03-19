@@ -38,6 +38,12 @@ class Config:
         "vector_db_path": ["VECTOR_DB_PATH"],
         "context_threshold": ["CONTEXT_THRESHOLD"],
         "auto_capture_enabled": ["AUTO_CAPTURE_ENABLED"],
+        # File cache settings
+        "cache_size": ["CACHE_SIZE"],
+        "cache_ttl": ["CACHE_TTL"],
+        # Compaction settings
+        "compaction_threshold": ["COMPACTION_THRESHOLD"],
+        "compaction_aggressive": ["COMPACTION_AGGRESSIVE"],
     }
 
     def __init__(self, working_dir: Path = None):
@@ -62,6 +68,12 @@ class Config:
             "vector_db_path": ".codebase-memory/vectors.db",
             "context_threshold": 50000,  # chars before offload
             "auto_capture_enabled": True,  # automatic memory capture
+            # File cache defaults
+            "cache_size": 100,  # max files to cache
+            "cache_ttl": 3600,  # cache TTL in seconds (1 hour)
+            # Compaction defaults
+            "compaction_threshold": 0.8,  # utilization % before compaction
+            "compaction_aggressive": False,  # enable aggressive compaction
         }
 
         # Load from home config (global defaults)
