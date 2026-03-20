@@ -37,9 +37,15 @@ class VectorStore:
         # Lazy-load embedding model
         self._embedding_model = None
         self._embedding_available = None
+        self._warmup_thread = None
+        self._model_lock = __import__('threading').Lock()
 
         # Initialize database
         self._init_db()
+
+        # Start background warmup of the embedding model
+        # This prevents the first search from blocking for 15-30s
+        self._start_warmup()
 
     # Cache at module level - check once, use forever
     _ST_AVAILABLE = None
@@ -72,14 +78,30 @@ class VectorStore:
         self._embedding_available = False
         return False
 
+    def _start_warmup(self):
+        """Pre-load embedding model in background thread to avoid first-call latency"""
+        import threading
+
+        def _warmup():
+            try:
+                self._get_embedding_model()
+            except Exception:
+                pass
+
+        if self._check_embedding_available():
+            self._warmup_thread = threading.Thread(target=_warmup, daemon=True)
+            self._warmup_thread.start()
+
     def _get_embedding_model(self):
-        """Get or lazy-load the embedding model"""
+        """Get or lazy-load the embedding model (thread-safe)"""
         if not self._check_embedding_available():
             return None
 
-        if self._embedding_model is None:
-            from sentence_transformers import SentenceTransformer
-            self._embedding_model = SentenceTransformer(self.embedding_model_name)
+        # Use lock to prevent duplicate loading from main + warmup threads
+        with self._model_lock:
+            if self._embedding_model is None:
+                from sentence_transformers import SentenceTransformer
+                self._embedding_model = SentenceTransformer(self.embedding_model_name)
 
         return self._embedding_model
 
