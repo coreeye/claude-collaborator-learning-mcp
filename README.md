@@ -31,18 +31,34 @@ GLM is configured for **creativity** and **deep thinking** — it doesn't just a
 pip install claude-collaborator
 ```
 
-Or install from source:
+Or install from source with all extras:
 ```bash
-git clone https://github.com/coreye/claude-collaborator-mcp.git
+git clone https://github.com/coreeye/claude-collaborator-mcp.git
 cd claude-collaborator-mcp
-pip install -e .
+pip install -e ".[all]"
 ```
 
 ## Quick Start
 
-### Recommended Configuration (Environment Variable)
+### Claude Code (Recommended)
 
-Set the `CSHARP_CODEBASE_PATH` environment variable in your Claude Desktop config:
+Register the MCP server globally so it works in any project:
+
+```bash
+claude mcp add --scope user claude-collaborator -- python -m claude_collaborator.server
+```
+
+Or register it for a specific project only:
+
+```bash
+claude mcp add --scope project claude-collaborator -- python -m claude_collaborator.server
+```
+
+This writes to `.mcp.json` in the project root.
+
+### Claude Desktop
+
+Add to your Claude Desktop config:
 
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -50,42 +66,47 @@ Set the `CSHARP_CODEBASE_PATH` environment variable in your Claude Desktop confi
 ```json
 {
   "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator",
+    "claude-collaborator": {
+      "command": "python",
+      "args": ["-m", "claude_collaborator.server"],
       "env": {
-        "CSHARP_CODEBASE_PATH": "C:\\path\\to\\your\\csharp\\project"
+        "CSHARP_CODEBASE_PATH": "C:\\path\\to\\your\\csharp\\project",
+        "GLM_API_KEY": "your_api_key_here"
       }
     }
   }
 }
 ```
 
-### With Config File (Alternative)
+### Configure GLM API Key
 
-Create `.claude/config.json` in your project:
+Set the API key using any of these methods (in priority order):
 
-```json
-{
-  "codebase_path": ".",
-  "glm_api_key": "your_key_here"
-}
-```
+1. **System environment variable** (recommended — works everywhere):
+   ```bash
+   # Windows
+   setx GLM_API_KEY "your_api_key_here"
 
-Then in Claude Desktop:
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator",
-      "cwd": "C:\\path\\to\\your\\csharp\\project"
-    }
-  }
-}
-```
+   # Linux/macOS
+   echo 'export GLM_API_KEY=your_api_key_here' >> ~/.bashrc
+   ```
+
+2. **`.env` file** in the project root:
+   ```
+   GLM_API_KEY=your_api_key_here
+   GLM_MODEL=glm-5
+   ```
+
+3. **Config file** (`.claude/config.json` in the project root):
+   ```json
+   {
+     "glm_api_key": "your_api_key_here"
+   }
+   ```
 
 ### Dynamic Codebase Switching
 
-You can still switch codebases during conversation:
+You can switch codebases during conversation:
 
 - **`switch_codebase(path)`** - Switch to a different repository
 - **`list_codebases(search_path?)`** - Discover available codebases
@@ -110,6 +131,7 @@ Claude: [calls switch_codebase] "Now working on Backend"
 - `memory_semantic_search` - Search by meaning (semantic similarity)
 - `memory_get` - Retrieve a specific topic
 - `memory_status` - View memory statistics
+- `memory_vector_stats` - View vector database statistics
 
 ### Context Management
 - `context_retrieve` - Retrieve relevant context for a query
@@ -127,6 +149,7 @@ Claude: [calls switch_codebase] "Now working on Backend"
 - `analyze_architecture` - Get overview of all projects
 - `extract_class_structure` - Parse class structure
 - `get_file_summary` - Get file statistics
+- `summarize_large_file` - GLM summarizes large files
 - `find_similar_code` - Find code patterns
 - `lookup_convention` - Lookup coding conventions
 
@@ -138,20 +161,23 @@ Claude: [calls switch_codebase] "Now working on Backend"
 - `list_dependencies` - Map file/project dependencies
 
 ### GLM Integration (requires API key)
-- `glm_explore` - Ask GLM questions for alternative perspectives
 - `summarize_large_file` - GLM summarizes large files
 - `get_alternative` - Get alternative approaches from GLM
 - `risk_check` - GLM identifies potential risks
 
 ## Configuration
 
-The server looks for configuration in this priority order:
+### Configuration Priority
 
-1. **Environment variables** (highest priority)
-2. **Project config files** (searched upward):
+Settings are loaded in this order (later sources override earlier ones):
+
+1. **Defaults** (built-in)
+2. **Home config**: `~/.claude-collaborator/config.json`
+3. **Project config files** (searched upward from current directory):
    - `.claude/config.json` (recommended)
    - `.claude-collaborator.json` (legacy)
-3. **Home config**: `~/.claude-collaborator/config.json`
+4. **`.env` file** in the project root (loaded via python-dotenv)
+5. **Environment variables** (highest priority)
 
 ### Configuration Options
 
@@ -182,7 +208,7 @@ The server looks for configuration in this priority order:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `auto_glm_enrich` | `true` | Automatically enrich with GLM in background |
+| `auto_glm_enrich` | `true` | Enable background GLM enrichment |
 | `glm_proactive_suggestions` | `true` | Show context-aware GLM tips |
 
 ### Environment Variables
@@ -190,6 +216,7 @@ The server looks for configuration in this priority order:
 | Variable | Description |
 |----------|-------------|
 | `CSHARP_CODEBASE_PATH` | Path to your C# solution |
+| `CODEBASE_PATH` | Alias for `CSHARP_CODEBASE_PATH` |
 | `GLM_API_KEY` | GLM API key |
 | `GLM_MODEL` | GLM model |
 | `MEMORY_PATH` | Memory storage path |
@@ -215,7 +242,16 @@ Captured results are:
 
 ## Multiple Projects
 
-### Recommended: Environment Variables
+### Recommended: Dynamic Switching
+
+Use a single server and switch between projects:
+
+```
+You: "List my C# projects" → list_codebases()
+You: "Switch to MainApp" → switch_codebase(path="C:\\Projects\\MainApp")
+```
+
+### Alternative: Separate Servers
 
 Configure multiple servers in Claude Desktop:
 
@@ -223,13 +259,15 @@ Configure multiple servers in Claude Desktop:
 {
   "mcpServers": {
     "csharp-main": {
-      "command": "claude-collaborator",
+      "command": "python",
+      "args": ["-m", "claude_collaborator.server"],
       "env": {
         "CSHARP_CODEBASE_PATH": "C:\\Projects\\MainApp"
       }
     },
     "csharp-tools": {
-      "command": "claude-collaborator",
+      "command": "python",
+      "args": ["-m", "claude_collaborator.server"],
       "env": {
         "CSHARP_CODEBASE_PATH": "C:\\Projects\\Tools"
       }
@@ -237,24 +275,6 @@ Configure multiple servers in Claude Desktop:
   }
 }
 ```
-
-### Alternative: Dynamic Switching
-
-Use a single server and switch between projects:
-
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator"
-    }
-  }
-}
-```
-
-Then in conversation:
-- "List my C# projects" → `list_codebases()`
-- "Switch to MainApp" → `switch_codebase(path="C:\\Projects\\MainApp")`
 
 ## GLM Integration (Optional)
 
@@ -264,19 +284,20 @@ GLM serves as Claude's creative sidekick, configured for maximum creativity and 
 # Install GLM dependencies
 pip install claude-collaborator[glm]
 
-# Set your API key (in .claude/config.json or environment)
-export GLM_API_KEY=your_api_key_here
+# Set your API key
+setx GLM_API_KEY "your_api_key_here"      # Windows (persistent)
+export GLM_API_KEY=your_api_key_here       # Linux/macOS
 ```
 
 ### Auto-Enrich Mode
 
 GLM automatically provides insights in the background for certain tools:
 
-- `extract_class_structure` → GLM analyzes patterns and refactoring opportunities
-- `find_class_usages` → GLM identifies coupling issues
-- `find_implementations` → GLM compares implementation approaches
-- `find_similar_code` → GLM provides deeper pattern analysis
-- `lookup_convention` → GLM evaluates if the convention should evolve
+- `extract_class_structure` - GLM analyzes patterns and refactoring opportunities
+- `find_class_usages` - GLM identifies coupling issues
+- `find_implementations` - GLM compares implementation approaches
+- `find_similar_code` - GLM provides deeper pattern analysis
+- `lookup_convention` - GLM evaluates if the convention should evolve
 
 These run **non-blocking** in the background, so Claude never waits.
 
@@ -287,9 +308,8 @@ The server intelligently suggests using GLM based on context:
 | Context | Suggestion |
 |---------|------------|
 | Result is large (>5000 chars) | "Use `summarize_large_file` to have GLM analyze it" |
-| After discovery tools | "Use `glm_explore` for research perspectives" |
-| After analysis tools | "Use `get_alternative` for different approaches" |
-| Pattern matching | "Use `risk_check` before making changes" |
+| After discovery tools | "Use `get_alternative` for different approaches" |
+| After analysis tools | "Use `risk_check` before making changes" |
 
 ### GLM Configuration
 
@@ -305,18 +325,11 @@ GLM runs with **temperature 1.0** and **deep thinking enabled** — optimized to
 - `glm-4-flash` - Faster responses
 - `glm-4-plus` - Enhanced capabilities
 
-### GLM Settings
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `auto_glm_enrich` | `true` | Enable background GLM enrichment |
-| `glm_proactive_suggestions` | `true` | Show context-aware GLM tips |
-
 ## Development
 
 ```bash
 # Install in development mode
-pip install -e ".[glm]"
+pip install -e ".[all]"
 
 # Run tests
 py -m unittest tests.test_analyzer

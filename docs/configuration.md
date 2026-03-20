@@ -2,15 +2,52 @@
 
 The claude-collaborator server supports flexible configuration through multiple sources.
 
-## Quick Start: Environment Variables (Recommended)
+## Quick Start
 
-The simplest way to configure is via environment variables in your Claude Desktop config:
+### Claude Code (Recommended)
+
+Register the MCP server globally:
+
+```bash
+claude mcp add --scope user claude-collaborator -- python -m claude_collaborator.server
+```
+
+This stores the config in `~/.claude.json` and makes it available in all projects.
+
+For project-only scope:
+
+```bash
+claude mcp add --scope project claude-collaborator -- python -m claude_collaborator.server
+```
+
+This creates a `.mcp.json` file in the project root:
 
 ```json
 {
   "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator",
+    "claude-collaborator": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "claude_collaborator.server"],
+      "env": {}
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Add to your Claude Desktop config:
+
+**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "claude-collaborator": {
+      "command": "python",
+      "args": ["-m", "claude_collaborator.server"],
       "env": {
         "CSHARP_CODEBASE_PATH": "C:\\path\\to\\your\\project",
         "GLM_API_KEY": "your_api_key_here"
@@ -24,15 +61,46 @@ The simplest way to configure is via environment variables in your Claude Deskto
 
 Settings are loaded in this order (later sources override earlier ones):
 
-1. **Home directory config** - `~/.claude-collaborator/config.json`
-2. **Project config files** (searched upward from current directory):
-   - `.claude/config.json` (recommended - Claude's standard)
+1. **Defaults** (built-in)
+2. **Home directory config** - `~/.claude-collaborator/config.json`
+3. **Project config files** (searched upward from current directory):
+   - `.claude/config.json` (recommended — Claude's standard)
    - `.claude-collaborator.json` (legacy support)
-3. **Environment variables** (override everything)
+4. **`.env` file** in the project root (loaded via python-dotenv)
+5. **Environment variables** (highest priority — override everything)
 
-## Configuration Files
+## Configuration Sources
 
-### Option 1: `.claude/config.json` (Recommended)
+### Option 1: System Environment Variable (Recommended for API Keys)
+
+Set environment variables persistently so they work in all projects:
+
+**Windows:**
+```cmd
+setx GLM_API_KEY "your_api_key_here"
+setx GLM_MODEL "glm-5"
+```
+
+**Linux/macOS:**
+```bash
+echo 'export GLM_API_KEY=your_api_key_here' >> ~/.bashrc
+echo 'export GLM_MODEL=glm-5' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Option 2: `.env` File (Recommended for Project-Specific Settings)
+
+Create a `.env` file in your project root:
+
+```
+CSHARP_CODEBASE_PATH=/path/to/your/csharp/project
+GLM_API_KEY=your_api_key_here
+GLM_MODEL=glm-5
+```
+
+The server loads this automatically via python-dotenv.
+
+### Option 3: `.claude/config.json` (Project Config)
 
 Place this file in your codebase root:
 
@@ -46,7 +114,7 @@ Place this file in your codebase root:
 }
 ```
 
-### Option 2: `.claude-collaborator.json` (Legacy)
+### Option 4: `.claude-collaborator.json` (Legacy)
 
 Place this file in your codebase root:
 
@@ -59,7 +127,7 @@ Place this file in your codebase root:
 }
 ```
 
-### Option 3: Global Config `~/.claude-collaborator/config.json`
+### Option 5: Global Config `~/.claude-collaborator/config.json`
 
 For settings that apply to all projects:
 
@@ -105,9 +173,16 @@ For settings that apply to all projects:
 | `compaction_threshold` | float | `0.8` | Utilization % before compaction (0.0-1.0) |
 | `compaction_aggressive` | boolean | `false` | Enable aggressive compaction |
 
+### GLM Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `auto_glm_enrich` | boolean | `true` | Automatically enrich with GLM in background |
+| `glm_proactive_suggestions` | boolean | `true` | Show context-aware GLM tips |
+
 ## Environment Variables
 
-Environment variables override config file settings:
+Environment variables override all other config sources:
 
 ### Basic Variables
 
@@ -135,21 +210,12 @@ Environment variables override config file settings:
 | `CACHE_SIZE` | `cache_size` | `100` |
 | `CACHE_TTL` | `cache_ttl` | `3600` |
 
-### Setting Environment Variables
+### GLM Variables
 
-**Windows (PowerShell):**
-```powershell
-$env:CSHARP_CODEBASE_PATH="C:\Projects\MyApp"
-$env:GLM_API_KEY="your_api_key"
-$env:AUTO_CAPTURE_ENABLED="true"
-```
-
-**Linux/macOS:**
-```bash
-export CSHARP_CODEBASE_PATH=/home/user/projects/my-app
-export GLM_API_KEY=your_api_key
-export AUTO_CAPTURE_ENABLED=true
-```
+| Variable | Maps To | Example |
+|----------|---------|---------|
+| `AUTO_GLM_ENRICH` | `auto_glm_enrich` | `true` |
+| `GLM_PROACTIVE_SUGGESTIONS` | `glm_proactive_suggestions` | `true` |
 
 ## Auto-Detection
 
@@ -194,102 +260,29 @@ list_codebases(search_path="C:\\Projects")
 # Returns: List of .sln files and .git repos found
 ```
 
-## Claude Desktop Configuration
-
-### Method 1: Environment Variables (Recommended)
-
-Works with a single codebase configured upfront:
-
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator",
-      "env": {
-        "CSHARP_CODEBASE_PATH": "C:\\Projects\\MyCSharpProject",
-        "GLM_API_KEY": "your_api_key"
-      }
-    }
-  }
-}
-```
-
-### Method 2: Using `cwd` (Auto-Detect from Directory)
-
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator",
-      "cwd": "C:\\Projects\\MyCSharpProject"
-    }
-  }
-}
-```
-
-The server auto-detects the codebase from the `cwd` directory.
-
-### Method 3: Using Config File
-
-Create `.claude/config.json` in your project:
-
-```json
-{
-  "codebase_path": ".",
-  "glm_api_key": "your_api_key",
-  "auto_capture_enabled": true
-}
-```
-
-Then in Claude Desktop config:
-
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator",
-      "cwd": "C:\\Projects\\MyCSharpProject"
-    }
-  }
-}
-```
-
-### Method 4: Dynamic Switching (For Multiple Projects)
-
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator"
-    }
-  }
-}
-```
-
-Then in conversation:
-```
-You: "List my C# projects"
-Claude: [calls list_codebases] → Shows all repos
-
-You: "Switch to backend project"
-Claude: [calls switch_codebase] → Now working on backend
-```
-
 ## Multiple Projects
 
-### Recommended: Separate Servers with Environment Variables
+### Recommended: Dynamic Switching
+
+One server handles multiple codebases. Use the tools to switch between repos:
+- `list_codebases(search_path)` - Discover available repos
+- `switch_codebase(path)` - Switch to a specific repo
+
+### Alternative: Separate Servers (Claude Desktop)
 
 ```json
 {
   "mcpServers": {
     "csharp-main": {
-      "command": "claude-collaborator",
+      "command": "python",
+      "args": ["-m", "claude_collaborator.server"],
       "env": {
         "CSHARP_CODEBASE_PATH": "C:\\Projects\\MainApp"
       }
     },
     "csharp-tools": {
-      "command": "claude-collaborator",
+      "command": "python",
+      "args": ["-m", "claude_collaborator.server"],
       "env": {
         "CSHARP_CODEBASE_PATH": "C:\\Projects\\Tools"
       }
@@ -298,63 +291,32 @@ Claude: [calls switch_codebase] → Now working on backend
 }
 ```
 
-### Alternative: Separate Servers with cwd
+## GLM Integration
 
-```json
-{
-  "mcpServers": {
-    "csharp-main": {
-      "command": "claude-collaborator",
-      "cwd": "C:\\Projects\\MainApp"
-    },
-    "csharp-tools": {
-      "command": "claude-collaborator",
-      "cwd": "C:\\Projects\\Tools"
-    }
-  }
-}
-```
+GLM provides additional AI-powered code exploration capabilities.
 
-### Alternative: Dynamic Switching
+### Getting an API Key
 
-One server handles multiple codebases:
+1. Visit [https://open.bigmodel.cn/](https://open.bigmodel.cn/)
+2. Create an account
+3. Generate an API key
 
-```json
-{
-  "mcpServers": {
-    "csharp": {
-      "command": "claude-collaborator"
-    }
-  }
-}
-```
+### Installing GLM Dependencies
 
-Use the tools to switch between repos:
-- `list_codebases(search_path)` - Discover available repos
-- `switch_codebase(path)` - Switch to a specific repo
-
-## Quick Setup Examples
-
-### For a Single Project (Simplest)
-
-1. Set `CSHARP_CODEBASE_PATH` environment variable in Claude Desktop config
-2. Server starts immediately with lazy initialization
-
-### For GLM Integration
-
-Add to your `.claude/config.json`:
-
-```json
-{
-  "codebase_path": ".",
-  "glm_api_key": "your_api_key_here"
-}
-```
-
-Or use environment variable:
 ```bash
-export GLM_API_KEY=your_api_key_here
+pip install claude-collaborator[glm]
 ```
+
+Or manually:
+```bash
+pip install zai-sdk openai
+```
+
+### Available Models
+
+- `glm-5` - Latest model with deep thinking (default)
+- `glm-4-flash` - Faster responses
+- `glm-4-plus` - Enhanced capabilities
 
 ## Project Structure Detection
 
@@ -381,33 +343,6 @@ MySolution/
         └── Project2.csproj
 ```
 
-## GLM Integration
-
-GLM provides additional AI-powered code exploration capabilities.
-
-### Getting an API Key
-
-1. Visit [https://open.bigmodel.cn/](https://open.bigmodel.cn/)
-2. Create an account
-3. Generate an API key
-
-### Installing GLM Dependencies
-
-```bash
-pip install claude-collaborator[glm]
-```
-
-Or manually:
-```bash
-pip install zai-sdk openai
-```
-
-### Available Models
-
-- `glm-5` - Latest model (default)
-- `glm-4-flash` - Faster responses
-- `glm-4-plus` - Enhanced capabilities
-
 ## Troubleshooting
 
 ### "Codebase path not found"
@@ -421,16 +356,16 @@ pip install zai-sdk openai
 - Verify the file is in the project root or a parent directory
 
 ### GLM not working
-- Verify `GLM_API_KEY` is set
+- Verify `GLM_API_KEY` is set: check with `echo $GLM_API_KEY` (or `echo %GLM_API_KEY%` on Windows)
 - Install GLM dependencies: `pip install claude-collaborator[glm]`
-- Check API key is valid
+- Check API key is valid at [https://open.bigmodel.cn/](https://open.bigmodel.cn/)
 
-### Tools not appearing in Claude Desktop
-- Restart Claude Desktop after changing config
-- Check Claude Desktop logs for errors
+### Tools not appearing
+- **Claude Code**: Run `claude mcp list` to check server status
+- **Claude Desktop**: Restart Claude Desktop after changing config
 - Verify installation: `pip show claude-collaborator`
 
 ### Server startup timeout
 - Ensure `CSHARP_CODEBASE_PATH` is set correctly
-- Check that vector memory dependencies are installed
+- Check that vector memory dependencies are installed: `pip install claude-collaborator[vector]`
 - Try disabling auto-capture: `AUTO_CAPTURE_ENABLED=false`
