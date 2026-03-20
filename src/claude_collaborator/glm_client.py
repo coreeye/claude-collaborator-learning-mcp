@@ -250,3 +250,103 @@ Provide a comprehensive analysis including:
 
         except Exception as e:
             return f"Error performing deep dive: {str(e)}"
+
+    def brainstorm(
+        self,
+        challenge: str,
+        context: str = "",
+        max_tokens: int = 2048
+    ) -> str:
+        """
+        Creative brainstorming - think divergently about a challenge.
+
+        Unlike explore (research) or compare (evaluation), this method
+        asks GLM to challenge assumptions and suggest unconventional approaches.
+
+        Args:
+            challenge: The problem, decision, or plan to brainstorm about
+            context: Additional code context or background
+            max_tokens: Maximum response tokens
+
+        Returns:
+            GLM's creative perspectives
+        """
+        try:
+            from zai import ZaiClient
+
+            client = ZaiClient(api_key=self.api_key)
+
+            prompt = f"""You are a creative technical advisor. Your role is to think divergently and challenge assumptions.
+
+Challenge: {challenge}
+
+{f"Context:\n{context}" if context else ""}
+
+Think creatively and provide:
+1. **Unconventional approaches** - solutions that aren't the obvious first choice
+2. **Hidden trade-offs** - downsides of the obvious approach that might be missed
+3. **Different angles** - reframe the problem from a different perspective
+4. **Creative solutions** - combine ideas from different domains or patterns
+5. **Assumptions to challenge** - what is being taken for granted that might not hold?
+
+Don't just validate the obvious approach. Push boundaries and surface ideas that a single perspective might miss. Be specific and actionable."""
+
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=1.0,
+                timeout=self.timeout
+            )
+
+            message = response.choices[0].message
+            content = message.content or message.reasoning_content or ""
+            return content
+
+        except ImportError:
+            return self._brainstorm_openai_compat(challenge, context, max_tokens)
+
+    def _brainstorm_openai_compat(
+        self,
+        challenge: str,
+        context: str,
+        max_tokens: int
+    ) -> str:
+        """Use OpenAI-compatible API for brainstorming"""
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url
+            )
+
+            prompt = f"""You are a creative technical advisor. Your role is to think divergently and challenge assumptions.
+
+Challenge: {challenge}
+
+{f"Context:\n{context}" if context else ""}
+
+Think creatively and provide:
+1. **Unconventional approaches** - solutions that aren't the obvious first choice
+2. **Hidden trade-offs** - downsides of the obvious approach that might be missed
+3. **Different angles** - reframe the problem from a different perspective
+4. **Creative solutions** - combine ideas from different domains or patterns
+5. **Assumptions to challenge** - what is being taken for granted that might not hold?
+
+Don't just validate the obvious approach. Push boundaries and surface ideas that a single perspective might miss. Be specific and actionable."""
+
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=1.0,
+                timeout=self.timeout
+            )
+
+            message = response.choices[0].message
+            content = message.content or message.reasoning_content or ""
+            return content
+
+        except Exception as e:
+            return f"Error brainstorming: {str(e)}"

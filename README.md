@@ -17,6 +17,8 @@ GLM is configured for **creativity** and **deep thinking** — it doesn't just a
 
 ## Features
 
+- **Auto-Learning**: Claude proactively captures knowledge during work -- patterns, workarounds, preferences, architecture insights
+- **Two-AI Collaboration**: GLM brainstorms creative approaches; Claude evaluates and decides
 - **Persistent Memory**: Never re-explain your architecture across sessions
 - **Automatic Memory Capture**: Tool results automatically saved to semantic memory
 - **Context Management**: Smart context tracking with automatic compaction
@@ -125,7 +127,11 @@ Claude: [calls switch_codebase] "Now working on Backend"
 - `list_codebases` - Discover codebases (.sln/.git) in a directory
 - `get_config` - View current configuration and status
 
-### Automatic Memory
+### Auto-Learning
+- `learn` - **Proactive**: Record observations and learnings during work (auto-categorized, deduplicated)
+- `session_learn` - Capture session learnings in batch at end of work
+
+### Memory
 - `memory_save` - Save findings for future sessions
 - `memory_search` - Search saved knowledge by keywords
 - `memory_semantic_search` - Search by meaning (semantic similarity)
@@ -161,9 +167,10 @@ Claude: [calls switch_codebase] "Now working on Backend"
 - `list_dependencies` - Map file/project dependencies
 
 ### GLM Integration (requires API key)
-- `summarize_large_file` - GLM summarizes large files
-- `get_alternative` - Get alternative approaches from GLM
-- `risk_check` - GLM identifies potential risks
+- `brainstorm` - **Proactive**: GLM thinks divergently about challenges -- unconventional approaches, hidden trade-offs
+- `get_alternative` - Get alternative approaches from GLM for comparison
+- `risk_check` - GLM identifies potential risks before changes
+- `summarize_large_file` - GLM summarizes large files to save context
 
 ## Configuration
 
@@ -210,6 +217,13 @@ Settings are loaded in this order (later sources override earlier ones):
 |--------|---------|-------------|
 | `auto_glm_enrich` | `true` | Enable background GLM enrichment |
 | `glm_proactive_suggestions` | `true` | Show context-aware GLM tips |
+
+### Auto-Learning Settings
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `learn_dedup_threshold` | `0.85` | Similarity threshold for deduplication (0-1) |
+| `learn_glm_extract` | `true` | Use GLM to extract insights from session summaries |
 
 ### Environment Variables
 
@@ -324,6 +338,49 @@ GLM runs with **temperature 1.0** and **deep thinking enabled** — optimized to
 - `glm-5` - Latest model with deep thinking (default)
 - `glm-4-flash` - Faster responses
 - `glm-4-plus` - Enhanced capabilities
+
+## Auto-Learning & Two-AI Collaboration
+
+### How It Works
+
+The MCP server has proactive tool descriptions that guide Claude to automatically:
+
+1. **Learn during work** -- Call `learn` when discovering patterns, workarounds, edge cases, or architecture insights
+2. **Brainstorm with GLM** -- Call `brainstorm` before committing to significant approaches
+3. **Recall past learnings** -- Call `memory_semantic_search` when starting new work
+
+This works automatically in any project where the MCP server is connected.
+
+### Enhanced Setup with CLAUDE.md (Optional)
+
+For richer proactive behavior, copy the sample CLAUDE.md to your global Claude config:
+
+```bash
+# Global (all projects)
+cp docs/CLAUDE.md.example ~/.claude/CLAUDE.md
+
+# Or project-specific
+cp docs/CLAUDE.md.example /path/to/your/project/CLAUDE.md
+```
+
+The CLAUDE.md adds detailed guidance for when to learn, when to brainstorm, and how to use GLM's input effectively.
+
+### What Gets Learned
+
+The `learn` tool auto-categorizes observations into:
+
+| Category | Examples |
+|----------|---------|
+| `workflow` | Build processes, deployment steps, CI/CD pipelines |
+| `preferences` | User conventions, naming standards, style preferences |
+| `workarounds` | Known issues and fixes, temporary solutions |
+| `patterns` | Code patterns, architecture conventions |
+| `decisions` | Design decisions and their rationale |
+| `edge_cases` | Gotchas, caveats, things that don't work as expected |
+| `architecture` | System structure, service boundaries, dependencies |
+| `context` | Project background, team context, requirements |
+
+Observations are automatically deduplicated -- if a similar learning already exists, it's updated rather than duplicated.
 
 ## Development
 

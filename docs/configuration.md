@@ -318,6 +318,42 @@ pip install zai-sdk openai
 - `glm-4-flash` - Faster responses
 - `glm-4-plus` - Enhanced capabilities
 
+## Auto-Learning & CLAUDE.md Setup
+
+### Proactive Learning (Works Automatically)
+
+The `learn` and `brainstorm` tools have proactive descriptions that guide Claude to use them automatically. No extra configuration needed -- just install the MCP server.
+
+### Enhanced Setup with CLAUDE.md (Optional)
+
+For richer proactive behavior, copy the sample CLAUDE.md:
+
+```bash
+# Global (all projects) -- recommended
+cp docs/CLAUDE.md.example ~/.claude/CLAUDE.md
+
+# Or project-specific
+cp docs/CLAUDE.md.example /path/to/your/project/CLAUDE.md
+```
+
+The CLAUDE.md adds detailed guidance for:
+- When to call `learn` (and when not to)
+- When to use `brainstorm`, `get_alternative`, `risk_check`
+- Checking `memory_semantic_search` at session start
+- Calling `session_learn` at session end
+
+### Auto-Learning Settings
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `learn_dedup_threshold` | `0.85` | Similarity threshold for deduplication |
+| `learn_glm_extract` | `true` | Use GLM to extract insights from session summaries |
+
+| Variable | Description |
+|----------|-------------|
+| `LEARN_DEDUP_THRESHOLD` | Similarity threshold (0-1) |
+| `LEARN_GLM_EXTRACT` | Enable GLM extraction (true/false) |
+
 ## Project Structure Detection
 
 The analyzer auto-detects common C# project layouts:

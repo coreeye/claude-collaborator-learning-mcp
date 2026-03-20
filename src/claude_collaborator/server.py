@@ -329,8 +329,19 @@ class ClaudeCollaboratorServer:
         # Build query from tool name and key arguments
         query_parts = [tool_name]
 
+        # Include active task name for better relevance
+        if self.session_state:
+            try:
+                state = self.session_state.get_state()
+                active_task = state.get("active_task")
+                if active_task:
+                    query_parts.append(active_task)
+            except Exception:
+                pass
+
         # Extract meaningful arguments for query
-        for key in ["pattern", "topic", "file_path", "class_name", "target", "project", "query", "interface_name"]:
+        for key in ["pattern", "topic", "file_path", "class_name", "target", "project", "query", "interface_name",
+                     "observation", "challenge"]:
             if key in arguments and arguments[key]:
                 query_parts.append(str(arguments[key]))
 
@@ -687,10 +698,87 @@ class ClaudeCollaboratorServer:
                     }
                 ),
 
+                # ==================== AUTO-LEARNING TOOLS ====================
+                Tool(
+                    name="learn",
+                    description="""PROACTIVE: Record an observation or learning from the current work session.
+
+Call this whenever you discover something worth remembering. Don't wait to be asked.
+
+WHEN TO CALL:
+- Non-obvious codebase patterns or conventions you discover
+- Debugging root causes and workarounds
+- User workflow preferences or development practices
+- Edge cases, gotchas, or "things that don't work as expected"
+- Architecture insights or design decision rationale
+- Setup, build, test, or deployment knowledge
+- Common issues and their solutions
+- How specific tools or pipelines work in this project
+
+WHEN NOT TO CALL:
+- Trivial file reads or routine operations
+- Temporary debugging hypotheses (only save confirmed findings)
+- Information that's already obvious from the code itself
+
+Category is auto-detected if not provided. Deduplicates against existing memories.""",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "observation": {
+                                "type": "string",
+                                "description": "What you learned or observed (freeform text)"
+                            },
+                            "category": {
+                                "type": "string",
+                                "description": "Optional category: workflow, preferences, workarounds, context, patterns, decisions, edge_cases, architecture, findings"
+                            },
+                            "importance": {
+                                "type": "string",
+                                "enum": ["low", "medium", "high"],
+                                "description": "Importance level (default: medium)"
+                            }
+                        },
+                        "required": ["observation"]
+                    }
+                ),
+                Tool(
+                    name="session_learn",
+                    description="""Capture learnings from the current work session in batch.
+
+Call at the end of meaningful work sessions to summarize what was learned.
+Stores each learning individually and saves the full summary for future reference.
+If GLM is available, extracts additional structured insights from the summary.""",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "string",
+                                "description": "Summary of what was learned during this session"
+                            },
+                            "learnings": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "observation": {"type": "string"},
+                                        "category": {"type": "string"}
+                                    },
+                                    "required": ["observation"]
+                                },
+                                "description": "Optional array of individual learnings to store"
+                            }
+                        },
+                        "required": ["summary"]
+                    }
+                ),
+
                 # ==================== SEMANTIC MEMORY TOOLS ====================
                 Tool(
                     name="memory_semantic_search",
-                    description="Search memory by meaning (semantic similarity), not just keywords. Finds related concepts even without exact word matches.",
+                    description="""Search memory by meaning (semantic similarity), not just keywords. Finds related concepts even without exact word matches.
+
+PROACTIVE: Check this at the start of new work or when beginning a new topic to recall past learnings.
+Also useful mid-task when you suspect something relevant was learned before.""",
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -1066,15 +1154,17 @@ NOTE: GLM only receives the file content (truncated), no extra context.""",
                 ),
                 Tool(
                     name="get_alternative",
-                    description="""Get an alternative approach from GLM for comparison.
+                    description="""PROACTIVE: Get an alternative approach from GLM for comparison.
 
 GLM PROVIDES: Different way to solve the problem (with your code only, no extra context)
 YOU (Claude) THEN: Evaluate pros/cons, decide whether to adopt
 
 USE THIS WHEN:
-- You want to consider options before deciding
-- You're uncertain and want a second perspective
-- Comparing multiple approaches
+- You already have an approach and want to compare it against GLM's suggestion
+- You want to validate your approach isn't missing something obvious
+- Comparing multiple implementation strategies
+
+Works with brainstorm (divergent thinking) and risk_check (risk analysis) as a two-AI collaboration system.
 
 IMPORTANT: You (Claude) make the final decision. GLM just provides input.
 
@@ -1096,16 +1186,18 @@ CONTEXT LIMIT: Only your code is sent (max 10K chars), no memory dumping.""",
                 ),
                 Tool(
                     name="risk_check",
-                    description="""GLM identifies potential risks in your proposed approach.
+                    description="""PROACTIVE: GLM identifies potential risks in your proposed approach.
 
 GLM PROVIDES: List of potential issues, edge cases, problems (brief input only)
 YOU (Claude) THEN: Validate which risks are real, prioritize them
 
 USE THIS WHEN:
+- Before implementing significant changes
 - Making architectural decisions
-- Planning significant changes
-- Reviewing complex code
-- Before committing to an approach
+- Planning changes that affect multiple files or systems
+- When the approach feels risky or you're unsure about edge cases
+
+Works with brainstorm (divergent thinking) and get_alternative (approach comparison) as a two-AI collaboration system.
 
 IMPORTANT: You (Claude) validate the risks. GLM might hallucinate.
 
@@ -1123,6 +1215,41 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
                             }
                         },
                         "required": ["proposed_change"]
+                    }
+                ),
+                Tool(
+                    name="brainstorm",
+                    description="""PROACTIVE: Get creative perspectives from GLM before committing to an approach.
+
+GLM PROVIDES: Unconventional approaches, hidden trade-offs, different angles, creative solutions
+YOU (Claude) THEN: Evaluate GLM's ideas critically, decide what to adopt
+
+USE THIS WHEN:
+- Planning architecture changes or significant implementations
+- Designing something new where multiple approaches exist
+- Stuck on a problem and want fresh perspectives
+- Making decisions with long-term consequences
+- Before committing to a complex approach
+
+Unlike get_alternative (compares your approach vs GLM's) or risk_check (finds risks),
+brainstorm asks GLM to think divergently and challenge assumptions.
+
+IMPORTANT: You (Claude) make the final decision. GLM provides creative input only.
+
+CONTEXT LIMIT: Your challenge only (max 10K chars), no extra context.""",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "challenge": {
+                                "type": "string",
+                                "description": "The problem, decision, or plan to brainstorm about"
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Additional code context or background (optional, keep brief)"
+                            }
+                        },
+                        "required": ["challenge"]
                     }
                 ),
 
@@ -1286,6 +1413,172 @@ CONTEXT LIMIT: Your approach only (max 10K chars), no extra context.""",
 - Topics by Category:"""
                     for cat, count in status['topics_by_category'].items():
                         output += f"\n  - {cat}: {count}"
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
+
+                # ==================== AUTO-LEARNING TOOLS ====================
+                elif name == "learn":
+                    observation = arguments["observation"]
+                    category = arguments.get("category")
+                    importance = arguments.get("importance", "medium")
+
+                    # Auto-detect category if not provided
+                    if not category:
+                        from .memory_auto import AutoCapture
+                        category = AutoCapture.categorize_text(observation)
+
+                    # Generate topic from first sentence or first 60 chars
+                    topic = observation.split('.')[0].strip()[:60] if '.' in observation[:80] else observation[:60]
+
+                    # Deduplicate: check if a very similar observation already exists
+                    dedup_threshold = self.config.get("learn_dedup_threshold", 0.85)
+                    if self.vector_store and self.vector_store._check_embedding_available():
+                        try:
+                            existing = self.vector_store.search(observation, limit=1, category=category)
+                            if existing and existing[0]['score'] >= dedup_threshold:
+                                existing_topic = existing[0]['topic']
+                                # If new observation is more detailed, update
+                                if len(observation) > len(existing[0]['content']):
+                                    self.vector_store.add(
+                                        topic=topic,
+                                        content=observation,
+                                        category=category,
+                                        metadata={
+                                            "importance": importance,
+                                            "learned_at": datetime.now().isoformat(),
+                                            "source": "learn_tool",
+                                            "updated_from": existing_topic
+                                        }
+                                    )
+                                    return self._process_tool_result(name, arguments, [TextContent(
+                                        type="text",
+                                        text=f"Updated existing learning: {topic} (category: {category})"
+                                    )])
+                                else:
+                                    return self._process_tool_result(name, arguments, [TextContent(
+                                        type="text",
+                                        text=f"Already known: {existing_topic} (score: {existing[0]['score']:.2f})"
+                                    )])
+                        except Exception:
+                            pass  # Proceed with normal save if dedup fails
+
+                    # Store in vector memory
+                    metadata = {
+                        "importance": importance,
+                        "learned_at": datetime.now().isoformat(),
+                        "source": "learn_tool"
+                    }
+
+                    if self.vector_store:
+                        try:
+                            self.vector_store.add(
+                                topic=topic,
+                                content=observation,
+                                category=category,
+                                metadata=metadata
+                            )
+                        except Exception:
+                            pass
+
+                    # Store in structured memory
+                    try:
+                        self.memory.save_finding(
+                            topic=topic,
+                            content=f"# {topic}\n\n{observation}",
+                            category=category,
+                            metadata=metadata
+                        )
+                    except Exception:
+                        pass
+
+                    return self._process_tool_result(name, arguments, [TextContent(
+                        type="text",
+                        text=f"Learned: {topic} (category: {category}, importance: {importance})"
+                    )])
+
+                elif name == "session_learn":
+                    summary = arguments["summary"]
+                    learnings = arguments.get("learnings", [])
+                    captured_count = 0
+
+                    # Store individual learnings
+                    for learning in learnings:
+                        obs = learning["observation"]
+                        cat = learning.get("category")
+                        if not cat:
+                            from .memory_auto import AutoCapture
+                            cat = AutoCapture.categorize_text(obs)
+
+                        topic = obs.split('.')[0].strip()[:60] if '.' in obs[:80] else obs[:60]
+                        metadata = {
+                            "learned_at": datetime.now().isoformat(),
+                            "source": "session_learn"
+                        }
+
+                        try:
+                            if self.vector_store:
+                                self.vector_store.add(
+                                    topic=topic, content=obs,
+                                    category=cat, metadata=metadata
+                                )
+                            self.memory.save_finding(
+                                topic=topic, content=f"# {topic}\n\n{obs}",
+                                category=cat, metadata=metadata
+                            )
+                            captured_count += 1
+                        except Exception:
+                            pass
+
+                    # Store full session summary
+                    summary_metadata = {
+                        "learned_at": datetime.now().isoformat(),
+                        "source": "session_learn",
+                        "learnings_count": len(learnings)
+                    }
+                    if self.vector_store:
+                        try:
+                            self.vector_store.add(
+                                topic=f"session_summary:{datetime.now().strftime('%Y-%m-%d_%H:%M')}",
+                                content=summary,
+                                category="session_summary",
+                                metadata=summary_metadata
+                            )
+                        except Exception:
+                            pass
+
+                    # GLM extraction if available
+                    glm_extracted = 0
+                    if self.glm_available and self.config.get("learn_glm_extract", True):
+                        try:
+                            glm_result = self.glm.explore(
+                                question="Extract key learnings from this session summary",
+                                context=f"Session summary:\n{summary[:4000]}\n\nExtract specific learnings about: codebase patterns, workarounds, user preferences, architecture insights, edge cases. Return each as a bullet point.",
+                                max_tokens=2048
+                            )
+                            if glm_result and not glm_result.startswith("Error"):
+                                # Store GLM-extracted insights
+                                if self.vector_store:
+                                    self.vector_store.add(
+                                        topic=f"glm_session_insights:{datetime.now().strftime('%Y-%m-%d_%H:%M')}",
+                                        content=glm_result,
+                                        category="findings",
+                                        metadata={"source": "session_learn_glm", "learned_at": datetime.now().isoformat()}
+                                    )
+                                    glm_extracted = 1
+                        except Exception:
+                            pass
+
+                    # Flush session state
+                    if self.session_state:
+                        try:
+                            self.session_state._flush()
+                        except Exception:
+                            pass
+
+                    output = f"Session learnings captured:\n"
+                    output += f"- Individual learnings: {captured_count}/{len(learnings)}\n"
+                    output += f"- Session summary: saved\n"
+                    if glm_extracted:
+                        output += f"- GLM-extracted insights: saved\n"
                     return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
 
                 # ==================== SEMANTIC MEMORY TOOLS ====================
@@ -1863,6 +2156,26 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
                     output = f"**GLM's Risk Assessment:**\n\n{result}\n\n**YOU (Claude)** should validate which risks are real and prioritize them."
 
                     # Auto-capture to vector memory
+                    self._maybe_auto_capture(name, arguments, output)
+
+                    return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])
+
+                elif name == "brainstorm":
+                    if not self.glm_available:
+                        return self._process_tool_result(name, arguments, [TextContent(type="text", text="GLM API key not configured. Brainstorm requires GLM.")])
+
+                    challenge = arguments["challenge"]
+                    context = arguments.get("context", "")
+
+                    result = self.glm.brainstorm(
+                        challenge=self._truncate_for_glm(challenge, 5000),
+                        context=self._truncate_for_glm(context, 5000) if context else "",
+                        max_tokens=2048
+                    )
+
+                    output = f"**GLM's Creative Perspectives:**\n\n{result}\n\n**YOU (Claude)** should evaluate these ideas critically. Adopt what makes sense, discard what doesn't. You make the final decision."
+
+                    # Auto-capture brainstorm results to memory
                     self._maybe_auto_capture(name, arguments, output)
 
                     return self._process_tool_result(name, arguments, [TextContent(type="text", text=output)])

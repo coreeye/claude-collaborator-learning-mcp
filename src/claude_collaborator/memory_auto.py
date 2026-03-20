@@ -32,6 +32,7 @@ class AutoCapture:
         "find_class_usages": "code",
         "find_implementations": "code",
         "get_callers": "code",
+        "brainstorm": "decisions",
     }
 
     # Pattern detection keywords
@@ -51,6 +52,57 @@ class AutoCapture:
         "edge case", "gotcha", "caveat", "warning", "issue", "bug",
         "doesn't work", "fails when", "only works if"
     ]
+
+    # Category detection keywords (used by learn tool and auto-capture)
+    CATEGORY_KEYWORDS = {
+        "workflow": [
+            "workflow", "pipeline", "process", "setup", "deploy", "deployment",
+            "build", "test run", "ci/cd", "release", "branch", "merge"
+        ],
+        "preferences": [
+            "prefer", "always", "never", "convention", "style", "format",
+            "naming", "standard", "rule", "guideline"
+        ],
+        "workarounds": [
+            "workaround", "hack", "trick", "fix for", "work around",
+            "instead of", "temporary fix", "known issue", "fallback"
+        ],
+        "context": [
+            "project", "team", "codebase", "repo", "history", "background",
+            "stakeholder", "requirement", "deadline", "milestone"
+        ],
+        "patterns": PATTERN_KEYWORDS,
+        "decisions": DECISION_KEYWORDS,
+        "edge_cases": EDGE_CASE_KEYWORDS,
+        "architecture": [
+            "architecture", "layer", "service", "module", "dependency",
+            "integration", "api", "database", "infrastructure"
+        ],
+    }
+
+    @classmethod
+    def categorize_text(cls, text: str) -> str:
+        """
+        Auto-detect the best category for a piece of text.
+
+        Args:
+            text: Text to categorize
+
+        Returns:
+            Best matching category string, defaults to "findings"
+        """
+        text_lower = text.lower()
+        scores = {}
+
+        for category, keywords in cls.CATEGORY_KEYWORDS.items():
+            score = sum(1 for kw in keywords if kw in text_lower)
+            if score > 0:
+                scores[category] = score
+
+        if not scores:
+            return "findings"
+
+        return max(scores, key=scores.get)
 
     def __init__(
         self,

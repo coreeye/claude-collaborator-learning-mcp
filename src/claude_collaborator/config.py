@@ -47,6 +47,9 @@ class Config:
         # GLM Auto-enrich settings
         "auto_glm_enrich": ["AUTO_GLM_ENRICH"],
         "glm_proactive_suggestions": ["GLM_PROACTIVE_SUGGESTIONS"],
+        # Auto-learning settings
+        "learn_dedup_threshold": ["LEARN_DEDUP_THRESHOLD"],
+        "learn_glm_extract": ["LEARN_GLM_EXTRACT"],
     }
 
     def __init__(self, working_dir: Path = None):

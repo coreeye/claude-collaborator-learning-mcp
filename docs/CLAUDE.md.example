@@ -1,0 +1,47 @@
+# Claude Collaborator - CLAUDE.md Example
+
+Copy this file to `~/.claude/CLAUDE.md` (global, all projects) or to your project root as `CLAUDE.md` (project-specific).
+
+This file instructs Claude Code to proactively use the claude-collaborator MCP server for learning and two-AI collaboration.
+
+---
+
+## Memory & Learning
+
+The claude-collaborator MCP server has persistent memory. Use it actively during work.
+
+### At session start
+- Call `memory_semantic_search` with a query related to the current task to recall past learnings.
+
+### During work - call `learn` proactively when you:
+- Discover a non-obvious codebase pattern or convention
+- Find a debugging root cause or workaround
+- Learn something about how the user works or their preferences
+- Encounter an edge case, gotcha, or unexpected behavior
+- Understand a design decision and its rationale
+- Figure out how to set up, build, test, or deploy something
+- Resolve a recurring issue or find a fix for a known problem
+
+### Do NOT call `learn` for:
+- Trivial file reads or routine code navigation
+- Temporary debugging hypotheses (only save confirmed findings)
+- Information that's already obvious from the code itself
+- Things you've already recorded in this session
+
+### At session end
+- Call `session_learn` with a summary of key findings if meaningful work was done.
+
+## Two-AI Collaboration
+
+Use GLM as a creative advisor. You (Claude) make the final decisions.
+
+### When planning significant work:
+- Call `brainstorm` to get creative perspectives and unconventional approaches from GLM
+- Call `get_alternative` when you already have an approach and want to compare against GLM's suggestion
+- Call `risk_check` before implementing changes that affect multiple files or systems
+
+### How to use GLM input:
+- Evaluate GLM's suggestions critically against what you know about the codebase
+- Adopt ideas that make sense, discard ones that don't
+- GLM may hallucinate or miss context -- you validate
+- The goal is to surface angles you might miss, not to follow GLM blindly
