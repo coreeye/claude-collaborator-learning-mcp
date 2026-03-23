@@ -36,13 +36,14 @@ class ServerMiddleware:
         self._glm_enrich_lock = threading.Lock()
 
         # Tools that auto-enrich with GLM
+        # Auto-enrich with GLM for tools where a second AI perspective adds depth.
+        # Runs in background, stores insights in vector memory.
         self._auto_enrich_tools = {
-            "extract_class_structure": "Analyze this class structure for patterns, design issues, and refactoring opportunities:\n\n{result}",
-            "find_class_usages": "Analyze these class usages for coupling patterns and potential issues:\n\n{result}",
-            "find_implementations": "Compare these implementations and note patterns, differences, and best practices:\n\n{result}",
-            "find_similar_code": "Analyze these similar code patterns and suggest which approach is best:\n\n{result}",
-            "lookup_convention": "Evaluate this convention and suggest if it should evolve:\n\n{result}",
-            "get_file_summary": "Based on this file summary, suggest what to explore next:\n\n{result}",
+            "learn": "Extract deeper insights from this observation. What non-obvious implications or related patterns should be noted?\n\n{result}",
+            "session_learn": "Analyze this session summary. Identify recurring themes, knowledge gaps, or patterns across the work done:\n\n{result}",
+            "lookup_convention": "Evaluate this convention. Should it evolve? Are there better alternatives used in modern C#?\n\n{result}",
+            "get_file_summary": "Based on this file summary, what areas deserve closer inspection? Any complexity or design concerns?\n\n{result}",
+            "find_similar_code": "Compare these similar code patterns. Which approach is better and why? Any consistency issues?\n\n{result}",
         }
 
     def _truncate_for_glm(self, content: str, max_chars: int = None) -> str:
@@ -115,7 +116,11 @@ class ServerMiddleware:
     # ==================== GLM AUTO-ENRICH & PROACTIVE SUGGESTIONS ====================
 
     def _auto_enrich_with_glm(self, tool_name: str, arguments: dict, result_text: str):
-        """Run GLM enrichment in background thread (non-blocking)."""
+        """Run GLM enrichment in background thread (non-blocking).
+
+        Stores insights in vector memory so they're available for future
+        semantic searches, not just discarded into a dict.
+        """
         if not self.glm_available:
             return
 
@@ -125,25 +130,30 @@ class ServerMiddleware:
         if tool_name not in self._auto_enrich_tools:
             return
 
-        enrich_key = f"{tool_name}_{hash(str(arguments))}_{time.time()}"
-
         def run_glm_enrich():
             try:
                 prompt_template = self._auto_enrich_tools[tool_name]
-                prompt = prompt_template.format(result=self._truncate_for_glm(result_text, 8000))
+                prompt = prompt_template.format(result=self._truncate_for_glm(result_text, 5000))
 
                 glm_response = self.glm.explore(
                     question=f"Auto-enrich for {tool_name}",
                     context=prompt,
-                    max_tokens=2048
+                    max_tokens=512
                 )
 
-                with self._glm_enrich_lock:
-                    self._glm_enrich_results[enrich_key] = {
-                        "tool": tool_name,
-                        "timestamp": time.time(),
-                        "response": glm_response
-                    }
+                # Store GLM insights in vector memory for future retrieval
+                if self.vector_store and glm_response and len(glm_response) > 50:
+                    arg_summary = str(arguments)[:80]
+                    self.vector_store.add(
+                        topic=f"glm:{tool_name}:{arg_summary}",
+                        content=glm_response,
+                        category="decisions",
+                        metadata={
+                            "source": "auto_enrich",
+                            "tool": tool_name,
+                            "arguments": str(arguments)[:200],
+                        }
+                    )
             except Exception:
                 pass
 

@@ -1,47 +1,54 @@
-# Claude Collaborator - CLAUDE.md Example
+# Claude Collaborator MCP Server
 
-Copy this file to `~/.claude/CLAUDE.md` (global, all projects) or to your project root as `CLAUDE.md` (project-specific).
-
-This file instructs Claude Code to proactively use the claude-collaborator MCP server for learning and two-AI collaboration.
+You have access to a claude-collaborator MCP server with persistent memory and two-AI collaboration (GLM). Use these tools proactively — don't wait to be asked.
 
 ---
 
-## Memory & Learning
+## Session Start
 
-The claude-collaborator MCP server has persistent memory. Use it actively during work.
+**Always do this first** before any other work:
+- Call `memory_semantic_search` with a query describing the current task. Check if past sessions learned anything relevant.
 
-### At session start
-- Call `memory_semantic_search` with a query related to the current task to recall past learnings.
+## When to Use `learn`
 
-### During work - call `learn` proactively when you:
-- Discover a non-obvious codebase pattern or convention
-- Find a debugging root cause or workaround
-- Learn something about how the user works or their preferences
-- Encounter an edge case, gotcha, or unexpected behavior
-- Understand a design decision and its rationale
-- Figure out how to set up, build, test, or deploy something
-- Resolve a recurring issue or find a fix for a known problem
+Call `learn` immediately when you confirm any of these:
+- A non-obvious pattern or convention in the codebase (e.g., "all DICOM files go through Distiller before Annotator")
+- A debugging root cause or workaround you verified
+- User preferences about how they work (e.g., "prefers single PRs over split ones")
+- An edge case or gotcha that isn't obvious from reading the code
+- A design decision and why it was made
+- Build/test/deploy knowledge that took effort to figure out
 
-### Do NOT call `learn` for:
-- Trivial file reads or routine code navigation
-- Temporary debugging hypotheses (only save confirmed findings)
-- Information that's already obvious from the code itself
-- Things you've already recorded in this session
+**Do NOT call `learn` for**: trivial observations, unconfirmed hypotheses, things obvious from the code, or things you already saved this session.
 
-### At session end
-- Call `session_learn` with a summary of key findings if meaningful work was done.
+## When to Use `memory_semantic_search`
 
-## Two-AI Collaboration
+- At session start (always)
+- When you're about to work on something and suspect a previous session encountered it
+- When the user says "we did this before" or "remember when..."
+- Before making architectural decisions — check if past learnings apply
 
-Use GLM as a creative advisor. You (Claude) make the final decisions.
+## When to Use GLM Collaboration
 
-### When planning significant work:
-- Call `brainstorm` to get creative perspectives and unconventional approaches from GLM
-- Call `get_alternative` when you already have an approach and want to compare against GLM's suggestion
-- Call `risk_check` before implementing changes that affect multiple files or systems
+These tools call a second AI (GLM) for a different perspective. Use them for **significant decisions**, not routine work.
 
-### How to use GLM input:
-- Evaluate GLM's suggestions critically against what you know about the codebase
-- Adopt ideas that make sense, discard ones that don't
-- GLM may hallucinate or miss context -- you validate
-- The goal is to surface angles you might miss, not to follow GLM blindly
+| Situation | Tool | What you get |
+|-----------|------|-------------|
+| Planning a non-trivial implementation | `brainstorm` | Unconventional approaches, hidden trade-offs, challenged assumptions |
+| You have an approach and want a sanity check | `get_alternative` | A different way to solve it, for comparison |
+| About to change multiple files or public APIs | `risk_check` | Edge cases, breaking changes, things you might miss |
+| File is too large to read in context | `summarize_large_file` | GLM reads and summarizes it for you |
+
+**After getting GLM input**: Evaluate critically. Adopt what makes sense, discard what doesn't. You make the final decision.
+
+## When to Use Pattern Discovery
+
+| Situation | Tool |
+|-----------|------|
+| "How was this kind of problem solved elsewhere?" | `find_similar_code` (searches by concept, not exact names) |
+| "What's the convention for X in this codebase?" | `lookup_convention` (finds examples + checks memory) |
+| "Quick overview of this file before diving in" | `get_file_summary` (line count, classes, complexity) |
+
+## Session End
+
+If meaningful work was done, call `session_learn` with a summary of key findings. This captures knowledge for future sessions and GLM extracts additional insights in the background.

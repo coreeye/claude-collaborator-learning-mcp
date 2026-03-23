@@ -153,16 +153,21 @@ def handle_learn(server, arguments: dict) -> str:
         "source": "learn_tool"
     }
 
+    vector_stored = False
     if server.vector_store:
         try:
-            server.vector_store.add(
+            result = server.vector_store.add(
                 topic=topic,
                 content=observation,
                 category=category,
                 metadata=metadata
             )
-        except Exception:
-            pass
+            if result == "queued":
+                vector_stored = "queued"
+            elif result is not None:
+                vector_stored = True
+        except Exception as e:
+            vector_stored = False
 
     # Store in structured memory
     try:
@@ -175,7 +180,13 @@ def handle_learn(server, arguments: dict) -> str:
     except Exception:
         pass
 
-    return f"Learned: {topic} (category: {category}, importance: {importance})"
+    if vector_stored == "queued":
+        vec_status = "vector: queued (model warming up)"
+    elif vector_stored:
+        vec_status = "vector: stored"
+    else:
+        vec_status = "vector: skipped"
+    return f"Learned: {topic} (category: {category}, importance: {importance}, {vec_status})"
 
 
 def handle_session_learn(server, arguments: dict) -> str:
@@ -785,7 +796,7 @@ Provide:
     result = server.glm.explore(
         question=f"Summarize file: {arguments['file_path']}",
         context=prompt,
-        max_tokens=2048
+        max_tokens=512
     )
 
     return f"**GLM Summary:**\n\n{result}"
@@ -809,7 +820,7 @@ Can you suggest an alternative approach? Keep it practical and concise."""
     result = server.glm.explore(
         question="Alternative approach",
         context=prompt,
-        max_tokens=2048
+        max_tokens=512
     )
 
     return f"**GLM's Alternative:**\n\n{result}\n\n**YOU (Claude)** should evaluate this and decide whether to adopt it."
@@ -833,7 +844,7 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
     result = server.glm.explore(
         question="Risk check",
         context=prompt,
-        max_tokens=2048
+        max_tokens=512
     )
 
     return f"**GLM's Risk Assessment:**\n\n{result}\n\n**YOU (Claude)** should validate which risks are real and prioritize them."
@@ -849,7 +860,7 @@ def handle_brainstorm(server, arguments: dict) -> str:
     result = server.glm.brainstorm(
         challenge=server._truncate_for_glm(challenge, 5000),
         context=server._truncate_for_glm(context, 5000) if context else "",
-        max_tokens=2048
+        max_tokens=512
     )
 
     return f"**GLM's Creative Perspectives:**\n\n{result}\n\n**YOU (Claude)** should evaluate these ideas critically. Adopt what makes sense, discard what doesn't. You make the final decision."
@@ -988,19 +999,11 @@ TOOL_HANDLERS = {
     "session_status": handle_session_status,
     "find_similar_code": handle_find_similar_code,
     "lookup_convention": handle_lookup_convention,
-    "get_callers": handle_get_callers,
-    "find_class_usages": handle_find_class_usages,
-    "find_implementations": handle_find_implementations,
-    "extract_class_structure": handle_extract_class_structure,
     "get_file_summary": handle_get_file_summary,
-    "list_dependencies": handle_list_dependencies,
-    "find_references": handle_find_references,
     "summarize_large_file": handle_summarize_large_file,
     "get_alternative": handle_get_alternative,
     "risk_check": handle_risk_check,
     "brainstorm": handle_brainstorm,
-    "explore_project": handle_explore_project,
-    "analyze_architecture": handle_analyze_architecture,
     "task_start": handle_task_start,
     "task_update": handle_task_update,
     "task_status": handle_task_status,
@@ -1012,5 +1015,4 @@ NO_INIT_REQUIRED = {"get_config", "switch_codebase", "list_codebases"}
 # Tools that auto-capture results to memory
 AUTO_CAPTURE_TOOLS = {
     "get_alternative", "risk_check", "brainstorm",
-    "explore_project", "analyze_architecture",
 }

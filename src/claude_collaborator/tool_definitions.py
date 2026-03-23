@@ -251,30 +251,28 @@ Also useful mid-task when you suspect something relevant was learned before.""",
 
 
 def get_code_navigation_tools() -> list[Tool]:
+    """Code navigation tools focused on pattern discovery and conventions.
+
+    Semantic code navigation (find references, find implementations, callers,
+    class structure, dependencies) has been removed — use a Roslyn-based MCP
+    server for accurate semantic analysis of C# code.
+
+    These tools provide unique value for fuzzy/conceptual searches:
+    - find_similar_code: search by concept description, not exact symbol names
+    - lookup_convention: learn codebase conventions from examples + memory
+    """
     return [
         Tool(
             name="find_similar_code",
-            description="""Find similar code patterns in the codebase.
+            description="""Find similar code patterns in the codebase by description.
 
-RETURNS: Code snippets with file paths showing how similar things are done
-YOU (Claude) then: Compare patterns, choose best approach, explain reasoning
+Unlike semantic symbol search (exact names), this searches by concept
+(e.g., 'DICOM handling', 'file processing', 'error retry logic').
 
 USE THIS TO:
-- Understand established patterns before making changes
 - Find examples of how similar problems were solved
-- Ensure consistency with existing codebase
-- Compare different implementation approaches
-
-COMMON WORKFLOWS:
-- Understanding a feature: lookup_convention -> find_similar_code -> extract_class_structure
-- Planning changes: find_similar_code -> get_callers -> find_references
-
-FOLLOW UP WITH:
-- extract_class_structure() to dive deeper into specific files
-- get_callers() to understand usage patterns
-- find_implementations() to compare approaches
-
-This tool DOES the finding, YOU do the thinking and deciding.""",
+- Understand established patterns before making changes
+- Compare different implementation approaches""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -310,10 +308,6 @@ USE THIS FOR:
 - Seeing how logging is typically done
 - Understanding async/await vs callback patterns
 
-COMMON WORKFLOWS:
-- Starting a task: lookup_convention -> find_similar_code
-- Before implementing: lookup_convention -> find_implementations
-
 This tool GATHERS examples, YOU decide whether to follow them.""",
             inputSchema={
                 "type": "object",
@@ -331,123 +325,16 @@ This tool GATHERS examples, YOU decide whether to follow them.""",
                 "required": ["topic"]
             }
         ),
-        Tool(
-            name="get_callers",
-            description="""Find all code that calls a specific method or class.
-
-RETURNS: List of all callers with file paths and code context
-YOU (Claude) then: Analyze impact, plan safe refactoring, understand what might break
-
-USE THIS WHEN:
-- Planning changes to a method
-- Understanding what might break if you change something
-- Finding ripple effects of changes
-- Need to understand usage patterns
-
-FOLLOW UP WITH:
-- find_references() for detailed member usage
-- trace_execution() to understand full flow""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Method or class name (e.g., 'ProcessFile', 'BaseDistiller')"
-                    }
-                },
-                "required": ["target"]
-            }
-        ),
-        Tool(
-            name="find_class_usages",
-            description="""Find all usages of a class or interface.
-
-RETURNS: List of all places where class is used/instantiated/inherited
-YOU (Claude) then: Analyze dependencies, understand coupling
-
-USE THIS WHEN:
-- Understanding how a class is used throughout codebase
-- Planning changes to an interface
-- Finding tight coupling issues
-
-FOLLOW UP WITH:
-- get_callers() for method-level usage
-- find_implementations() to see implementations""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "class_name": {
-                        "type": "string",
-                        "description": "Class or interface name (e.g., 'BaseDistiller')"
-                    }
-                },
-                "required": ["class_name"]
-            }
-        ),
-        Tool(
-            name="find_implementations",
-            description="""Find all implementations of an interface or abstract class.
-
-RETURNS: List of all implementing classes with their key methods
-YOU (Claude) then: Compare implementations, find patterns, choose reference
-
-USE THIS WHEN:
-- Understanding different implementations of a contract
-- Comparing approaches across components
-- Finding which implementation to use as reference
-
-FOLLOW UP WITH:
-- extract_class_structure() to compare specific implementations
-- find_similar_code() to see related patterns""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "interface_name": {
-                        "type": "string",
-                        "description": "Interface or abstract class name"
-                    }
-                },
-                "required": ["interface_name"]
-            }
-        ),
     ]
 
 
 def get_code_analysis_tools() -> list[Tool]:
+    """Code analysis tools for quick file-level insights.
+
+    Semantic analysis tools (class structure, dependencies, references)
+    have been removed — use a Roslyn-based MCP server for those.
+    """
     return [
-        Tool(
-            name="extract_class_structure",
-            description="""Parse a C# class and extract its structure.
-
-RETURNS: Structured list of methods, properties, fields, events with signatures
-YOU (Claude) then: Understand relationships, plan integration, design changes
-
-SAVES YOUR CONTEXT: Instead of reading the whole file, get the structure first
-
-USE THIS WHEN:
-- Understanding a class before diving into details
-- Planning how to extend or modify a class
-- Comparing class structures
-
-COMMON WORKFLOWS:
-- Understanding a class: get_file_summary -> extract_class_structure
-- Refactoring: extract_class_structure -> get_callers -> find_references""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the C# file (relative to codebase root)"
-                    },
-                    "include_body": {
-                        "type": "boolean",
-                        "description": "Include method bodies (default: false)",
-                        "default": False
-                    }
-                },
-                "required": ["file_path"]
-            }
-        ),
         Tool(
             name="get_file_summary",
             description="""Get summary statistics for a file.
@@ -458,11 +345,7 @@ YOU (Claude) then: Decide if deep analysis is needed
 USE THIS WHEN:
 - Quickly understanding file scope
 - Deciding where to focus attention
-- Assessing file complexity
-
-FOLLOW UP WITH:
-- extract_class_structure() for detailed analysis
-- find_similar_code() to compare with other files""",
+- Assessing file complexity""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -472,63 +355,6 @@ FOLLOW UP WITH:
                     }
                 },
                 "required": ["file_path"]
-            }
-        ),
-        Tool(
-            name="list_dependencies",
-            description="""Map all dependencies for a file or project.
-
-RETURNS: List of all imports, references, project dependencies
-YOU (Claude) then: Understand coupling, plan changes
-
-USE THIS WHEN:
-- Understanding what a file depends on
-- Planning refactors that might affect dependencies
-- Assessing coupling
-
-FOLLOW UP WITH:
-- get_callers() for reverse dependencies
-- find_class_usages() for specific class usage""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "File path or project name"
-                    }
-                },
-                "required": ["target"]
-            }
-        ),
-        Tool(
-            name="find_references",
-            description="""Find all references to a member (method, property, field).
-
-RETURNS: List of all usages with context
-YOU (Claude) then: Plan safe refactoring
-
-USE THIS WHEN:
-- Planning to rename or modify a member
-- Understanding how something is used
-- Finding all places that need updates
-
-FOLLOW UP WITH:
-- get_callers() for method/class level
-- trace_execution() to understand flow""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "member_name": {
-                        "type": "string",
-                        "description": "Member name to find references for"
-                    },
-                    "file_pattern": {
-                        "type": "string",
-                        "description": "File pattern to search (default: *.cs)",
-                        "default": "*.cs"
-                    }
-                },
-                "required": ["member_name"]
             }
         ),
     ]
@@ -670,28 +496,13 @@ CONTEXT LIMIT: Your challenge only (max 10K chars), no extra context.""",
 
 
 def get_project_tools() -> list[Tool]:
-    return [
-        Tool(
-            name="explore_project",
-            description="Explore a C# project and generate comprehensive summary",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project": {"type": "string", "description": "Project name (e.g., 'MyProject')"}
-                },
-                "required": ["project"]
-            }
-        ),
-        Tool(
-            name="analyze_architecture",
-            description="Analyze overall solution architecture",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-    ]
+    """Project-level tools.
+
+    NOTE: explore_project and analyze_architecture have been removed —
+    use a Roslyn-based MCP server for semantic project structure and
+    dependency analysis.
+    """
+    return []
 
 
 def get_task_tools() -> list[Tool]:

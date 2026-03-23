@@ -5,6 +5,7 @@ Provides embedding-based semantic search capabilities
 
 import json
 import os
+import sys
 import sqlite3
 import uuid
 from datetime import datetime
@@ -105,14 +106,21 @@ class VectorStore:
 
         def _warmup():
             try:
+                print(f"[warmup] starting model load...", file=sys.stderr, flush=True)
                 self._get_embedding_model()
                 self._model_ready = True
-            except Exception:
-                pass
+                print(f"[warmup] model ready", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"[warmup] FAILED: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
 
-        if self._check_embedding_available():
+        avail = self._check_embedding_available()
+        print(f"[warmup] embedding available={avail}", file=sys.stderr, flush=True)
+        if avail:
             self._warmup_thread = threading.Thread(target=_warmup, daemon=True)
             self._warmup_thread.start()
+            print(f"[warmup] thread started", file=sys.stderr, flush=True)
 
     def is_model_ready(self) -> bool:
         """Check if the embedding model has finished loading (non-blocking)."""
@@ -123,33 +131,41 @@ class VectorStore:
         if not self._check_embedding_available():
             return None
 
-        # Use lock to prevent duplicate loading from main + warmup threads
+        # Fast path: model already loaded, no lock needed
+        if self._embedding_model is not None:
+            return self._embedding_model
+
+        # Check if model was pre-loaded in main() before asyncio started
+        preloaded = getattr(VectorStore, '_preloaded_model', None)
+        if preloaded is not None:
+            self._embedding_model = preloaded
+            return self._embedding_model
+
+        # Slow path: load model under lock (prevents duplicate loading)
         with self._model_lock:
             if self._embedding_model is None:
                 import logging
                 # Suppress logging from model loading libraries
                 for name in ["sentence_transformers", "transformers",
-                             "huggingface_hub", "filelock"]:
+                             "huggingface_hub", "filelock", "torch"]:
                     logging.getLogger(name).setLevel(logging.ERROR)
-                # Redirect fd 1 and fd 2 to devnull during model loading.
-                # SentenceTransformer prints progress and load reports directly
-                # to fd 1 (C-level stdout). The MCP transport has been set up
-                # (in main()) to use a dup'd fd instead of fd 1, so this
-                # redirect is safe — it only catches stray library output.
-                stdout_backup = os.dup(1)
-                stderr_backup = os.dup(2)
-                devnull_fd = os.open(os.devnull, os.O_WRONLY)
-                try:
-                    os.dup2(devnull_fd, 1)
-                    os.dup2(devnull_fd, 2)
-                    from sentence_transformers import SentenceTransformer
-                    self._embedding_model = SentenceTransformer(self.embedding_model_name)
-                finally:
-                    os.dup2(stdout_backup, 1)
-                    os.dup2(stderr_backup, 2)
-                    os.close(devnull_fd)
-                    os.close(stdout_backup)
-                    os.close(stderr_backup)
+
+                # Suppress SentenceTransformer's prints during model loading.
+                # IMPORTANT: Neither os.dup2 NOR contextlib.redirect_stdout
+                # are thread-safe. os.dup2 corrupts fd-level streams used by
+                # MCP transport, and contextlib.redirect_stdout replaces
+                # sys.stdout GLOBALLY (not per-thread), swallowing output from
+                # all threads during the redirect window.
+                # Instead, use environment variables to suppress library output.
+                os.environ["TOKENIZERS_PARALLELISM"] = "false"
+                os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+                os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+                os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+                from sentence_transformers import SentenceTransformer
+                self._embedding_model = SentenceTransformer(
+                    self.embedding_model_name,
+                    trust_remote_code=False
+                )
 
         return self._embedding_model
 
@@ -238,22 +254,27 @@ class VectorStore:
         if not self._check_embedding_available():
             return None
 
-        # Don't block waiting for model warmup — return None if not ready
+        # If model not ready yet, queue the write for background processing
+        # instead of blocking the caller (which blocks the MCP transport)
         if not self.is_model_ready():
-            return None
+            self._queue_pending_write(topic, content, category, metadata)
+            return "queued"
 
-        # Generate unique ID
+        # Model is ready — first flush any pending writes from warmup period
+        self._flush_pending_writes()
+
+        return self._do_add(topic, content, category, metadata)
+
+    def _do_add(self, topic, content, category, metadata):
+        """Actually compute embedding and store in DB."""
         vector_id = str(uuid.uuid4())
 
-        # Compute embedding
         embedding = self._compute_embedding(f"{topic}. {content}")
         if embedding is None:
             return None
 
-        # Prepare metadata
         metadata_json = json.dumps(metadata or {})
 
-        # Insert into database
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -274,6 +295,29 @@ class VectorStore:
         conn.close()
 
         return vector_id
+
+    def _queue_pending_write(self, topic, content, category, metadata):
+        """Queue a write to be processed once the model is ready."""
+        import threading
+        if not hasattr(self, '_pending_writes'):
+            self._pending_writes = []
+            self._pending_lock = threading.Lock()
+
+        with self._pending_lock:
+            self._pending_writes.append((topic, content, category, metadata))
+
+    def _flush_pending_writes(self):
+        """Flush any queued writes now that the model is ready."""
+        if not hasattr(self, '_pending_writes'):
+            return
+        with self._pending_lock:
+            pending = list(self._pending_writes)
+            self._pending_writes.clear()
+        for t, c, cat, meta in pending:
+            try:
+                self._do_add(t, c, cat, meta)
+            except Exception:
+                pass
 
     def search(
         self,
@@ -300,6 +344,9 @@ class VectorStore:
         # Don't block waiting for model warmup — return empty if not ready
         if not self.is_model_ready():
             return []
+
+        # Flush any writes that were queued during warmup
+        self._flush_pending_writes()
 
         # Compute query embedding
         query_embedding = self._compute_embedding(query)
