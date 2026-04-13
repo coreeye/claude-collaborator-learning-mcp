@@ -40,7 +40,7 @@ class TestGLMDiagnostic(unittest.TestCase):
 
     def test_02_glm_model_configured(self):
         """Check GLM_MODEL setting."""
-        model = os.getenv("GLM_MODEL", "glm-5")
+        model = os.getenv("GLM_MODEL", "glm-5.1")
         print(f"  OK: GLM_MODEL: {model}")
 
     # ─── Step 2: SDK Import ─────────────────────────────────────

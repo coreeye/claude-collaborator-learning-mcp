@@ -77,7 +77,7 @@ Settings are loaded in this order (later sources override earlier ones):
 |--------|------|---------|-------------|
 | `codebase_path` | string | auto-detected | Path to C# solution root |
 | `glm_api_key` | string | (none) | API key for GLM integration |
-| `glm_model` | string | `glm-5` | GLM model to use |
+| `glm_model` | string | `glm-5.1` | GLM model to use |
 | `memory_path` | string | `.codebase-memory` | Path for memory storage |
 
 ### Vector Memory Options
@@ -116,7 +116,7 @@ Settings are loaded in this order (later sources override earlier ones):
 |----------|-------------|
 | `CODEBASE_PATH` | Path to your C# solution |
 | `GLM_API_KEY` | GLM API key |
-| `GLM_MODEL` | GLM model (default: glm-5) |
+| `GLM_MODEL` | GLM model (default: glm-5.1) |
 | `MEMORY_PATH` | Memory storage path |
 | `EMBEDDING_MODEL` | Embedding model for semantic search |
 | `AUTO_GLM_ENRICH` | Enable GLM auto-enrich (true/false) |
@@ -141,7 +141,7 @@ pip install claude-collaborator[glm]
 
 ### Available Models
 
-- `glm-5` - Latest model with deep thinking (default)
+- `glm-5.1` - Latest flagship model with deep thinking (default)
 - `glm-4-flash` - Faster responses
 - `glm-4-plus` - Enhanced capabilities
 

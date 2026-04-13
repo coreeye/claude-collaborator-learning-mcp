@@ -67,7 +67,7 @@ class Config:
         """Load configuration from all sources"""
         # Start with defaults
         self._config = {
-            "glm_model": "glm-5",
+            "glm_model": "glm-5.1",
             "memory_path": ".codebase-memory",
             # Vector memory defaults
             "embedding_model": "all-MiniLM-L6-v2",  # Fast, good quality embedding model

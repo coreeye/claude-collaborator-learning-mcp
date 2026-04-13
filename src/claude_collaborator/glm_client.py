@@ -1,6 +1,6 @@
 """
 GLM Client for AI Research Tasks
-Handles communication with GLM-5 API
+Handles communication with GLM-5.1 API
 """
 
 import os
@@ -12,12 +12,12 @@ load_dotenv()
 
 
 class GLMClient:
-    """Client for GLM-5 API"""
+    """Client for GLM-5.1 API"""
 
     def __init__(self):
         """Initialize GLM client"""
         self.api_key = os.getenv("GLM_API_KEY")
-        self.model = os.getenv("GLM_MODEL", "glm-5")
+        self.model = os.getenv("GLM_MODEL", "glm-5.1")
         self.base_url = "https://api.z.ai/api/paas/v4"
         self.timeout = 120  # 120 second timeout for API calls
 
@@ -74,7 +74,7 @@ Be specific and reference code elements when possible."""
                 timeout=self.timeout
             )
 
-            # GLM-5 puts reasoning in reasoning_content field
+            # GLM-5.1 puts reasoning in reasoning_content field
             message = response.choices[0].message
             content = message.content or message.reasoning_content or ""
             return content
@@ -125,7 +125,7 @@ Be specific and reference code elements when possible."""
                 timeout=self.timeout
             )
 
-            # GLM-5 puts reasoning in reasoning_content field
+            # GLM-5.1 puts reasoning in reasoning_content field
             message = response.choices[0].message
             content = message.content or message.reasoning_content or ""
             return content
@@ -184,7 +184,7 @@ Provide:
                 timeout=self.timeout
             )
 
-            # GLM-5 puts reasoning in reasoning_content field
+            # GLM-5.1 puts reasoning in reasoning_content field
             message = response.choices[0].message
             content = message.content or message.reasoning_content or ""
             return content
@@ -243,7 +243,7 @@ Provide a comprehensive analysis including:
                 timeout=self.timeout
             )
 
-            # GLM-5 puts reasoning in reasoning_content field
+            # GLM-5.1 puts reasoning in reasoning_content field
             message = response.choices[0].message
             content = message.content or message.reasoning_content or ""
             return content
