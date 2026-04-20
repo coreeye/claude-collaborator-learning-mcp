@@ -866,6 +866,23 @@ def handle_brainstorm(server, arguments: dict) -> str:
     return f"**GLM's Creative Perspectives:**\n\n{result}\n\n**YOU (Claude)** should evaluate these ideas critically. Adopt what makes sense, discard what doesn't. You make the final decision."
 
 
+def handle_code_review(server, arguments: dict) -> str:
+    if not server.glm_available:
+        return "GLM API key not configured."
+
+    code = arguments["code"]
+    file_path = arguments.get("file_path", "")
+    focus = arguments.get("focus", "")
+
+    result = server.glm.code_review(
+        code=server._truncate_for_glm(code, 8000),
+        file_path=file_path,
+        focus=focus,
+    )
+
+    return f"**GLM Code Review:**\n\n{result}\n\n**YOU (Claude)** should evaluate these suggestions and apply the ones that make sense."
+
+
 # ==================== PROJECT-LEVEL TOOLS ====================
 
 
@@ -1004,6 +1021,7 @@ TOOL_HANDLERS = {
     "get_alternative": handle_get_alternative,
     "risk_check": handle_risk_check,
     "brainstorm": handle_brainstorm,
+    "code_review": handle_code_review,
     "task_start": handle_task_start,
     "task_update": handle_task_update,
     "task_status": handle_task_status,
@@ -1014,5 +1032,5 @@ NO_INIT_REQUIRED = {"get_config", "switch_codebase", "list_codebases"}
 
 # Tools that auto-capture results to memory
 AUTO_CAPTURE_TOOLS = {
-    "get_alternative", "risk_check", "brainstorm",
+    "get_alternative", "risk_check", "brainstorm", "code_review",
 }

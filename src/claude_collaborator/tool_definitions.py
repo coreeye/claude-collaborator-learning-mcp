@@ -492,6 +492,43 @@ CONTEXT LIMIT: Your challenge only (max 10K chars), no extra context.""",
                 "required": ["challenge"]
             }
         ),
+        Tool(
+            name="code_review",
+            description="""PROACTIVE: Ask GLM to review code you just wrote or modified.
+
+GLM REVIEWS: Code quality, modern C# usage, formatting, dead code, unused usings, error handling, null safety, async patterns, security, SOLID, naming conventions, and more
+YOU (Claude) THEN: Evaluate the feedback, apply fixes where appropriate
+
+USE THIS WHEN:
+- After writing or modifying C# code
+- Before finalizing a PR or commit
+- When you want a second opinion on code quality
+- To catch things like unused usings, dead code, security issues, or missed modern C# features
+
+Works with the other GLM tools as a two-AI collaboration system.
+
+IMPORTANT: You (Claude) decide which suggestions to apply. GLM provides review input only.
+
+CONTEXT LIMIT: Code only (max 10K chars), no extra context.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The code to review"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "File path for context (optional)"
+                    },
+                    "focus": {
+                        "type": "string",
+                        "description": "Specific focus areas (optional, e.g. 'performance', 'readability', 'modern C# features')"
+                    }
+                },
+                "required": ["code"]
+            }
+        ),
     ]
 
 

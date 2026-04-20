@@ -350,3 +350,138 @@ Don't just validate the obvious approach. Push boundaries and surface ideas that
 
         except Exception as e:
             return f"Error brainstorming: {str(e)}"
+
+    def code_review(
+        self,
+        code: str,
+        file_path: str = "",
+        focus: str = "",
+        max_tokens: int = 1024
+    ) -> str:
+        """
+        Review code for quality, best practices, and potential improvements.
+
+        Args:
+            code: The code to review
+            file_path: Optional file path for context
+            focus: Optional specific focus areas
+            max_tokens: Maximum response tokens
+
+        Returns:
+            GLM's code review findings
+        """
+        try:
+            from zai import ZaiClient
+
+            client = ZaiClient(api_key=self.api_key)
+
+            prompt = f"""You are a senior C# code reviewer. Review the following code and list ONLY the issues found. Do not include your analysis process or reasoning steps in the output.
+
+{f"File: {file_path}" if file_path else ""}
+{f"Focus: {focus}" if focus else ""}
+
+```csharp
+{code}
+```
+
+Check for these categories (skip any that have no issues):
+- Dead code, unused variables, commented-out code
+- Unused using directives
+- Modern C# features that could be used (pattern matching, records, file-scoped namespaces, primary constructors, collection expressions, raw string literals, etc.)
+- Naming convention violations (PascalCase/camelCase)
+- Formatting inconsistencies
+- Error handling problems (swallowed exceptions, catching generic Exception)
+- Null safety issues (missing ?. or ??, nullable reference types)
+- Async/await mistakes (async void, sync-over-async, Task.Result deadlocks)
+- Missing resource disposal (IDisposable without using)
+- Security issues (hardcoded secrets, SQL injection, input validation)
+- SOLID violations (god classes, tight coupling)
+- Magic numbers/strings that should be constants
+- Access modifiers too permissive (public when could be private/internal)
+- Performance issues (unnecessary allocations, string concat in loops)
+
+Output format - for each issue, one bullet:
+* **Category**: `problematic code` -> Suggested fix.
+
+Output ONLY the bullet list. No preamble, no analysis steps, no numbering of your thought process."""
+
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=1.0,
+                timeout=self.timeout
+            )
+
+            message = response.choices[0].message
+            # Prefer content (final answer) over reasoning_content (chain-of-thought)
+            content = message.content or ""
+            if not content.strip():
+                content = getattr(message, "reasoning_content", "") or ""
+            return content
+
+        except ImportError:
+            return self._code_review_openai_compat(code, file_path, focus, max_tokens)
+
+    def _code_review_openai_compat(
+        self,
+        code: str,
+        file_path: str,
+        focus: str,
+        max_tokens: int
+    ) -> str:
+        """Use OpenAI-compatible API for code review"""
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url
+            )
+
+            prompt = f"""You are a senior C# code reviewer. Review the following code and list ONLY the issues found. Do not include your analysis process or reasoning steps in the output.
+
+{f"File: {file_path}" if file_path else ""}
+{f"Focus: {focus}" if focus else ""}
+
+```csharp
+{code}
+```
+
+Check for these categories (skip any that have no issues):
+- Dead code, unused variables, commented-out code
+- Unused using directives
+- Modern C# features that could be used (pattern matching, records, file-scoped namespaces, primary constructors, collection expressions, raw string literals, etc.)
+- Naming convention violations (PascalCase/camelCase)
+- Formatting inconsistencies
+- Error handling problems (swallowed exceptions, catching generic Exception)
+- Null safety issues (missing ?. or ??, nullable reference types)
+- Async/await mistakes (async void, sync-over-async, Task.Result deadlocks)
+- Missing resource disposal (IDisposable without using)
+- Security issues (hardcoded secrets, SQL injection, input validation)
+- SOLID violations (god classes, tight coupling)
+- Magic numbers/strings that should be constants
+- Access modifiers too permissive (public when could be private/internal)
+- Performance issues (unnecessary allocations, string concat in loops)
+
+Output format - for each issue, one bullet:
+* **Category**: `problematic code` -> Suggested fix.
+
+Output ONLY the bullet list. No preamble, no analysis steps, no numbering of your thought process."""
+
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=1.0,
+                timeout=self.timeout
+            )
+
+            message = response.choices[0].message
+            content = message.content or ""
+            if not content.strip():
+                content = getattr(message, "reasoning_content", "") or ""
+            return content
+
+        except Exception as e:
+            return f"Error reviewing code: {str(e)}"
