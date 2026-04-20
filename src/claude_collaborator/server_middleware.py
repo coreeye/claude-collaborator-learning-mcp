@@ -29,6 +29,16 @@ class ServerMiddleware:
     MAX_MEMORY_RESULTS = 3    # number of memory results to include
     MAX_TOOL_RESULT_SIZE = 1500  # max chars for tool result before truncation
 
+    # Tools whose whole purpose is producing substantial deliberative output.
+    # Truncating these would defeat the point — the caller needs the full text.
+    DELIBERATIVE_TOOLS = {
+        "brainstorm",
+        "code_review",
+        "risk_check",
+        "get_alternative",
+        "summarize_large_file",
+    }
+
     def _init_middleware(self):
         """Initialize middleware state. Call from server __init__."""
         self._current_retrieved_context = None
@@ -223,9 +233,13 @@ class ServerMiddleware:
 
         result_text = result[0].text if hasattr(result[0], 'text') else str(result[0])
 
-        # 1. Truncate for response
+        # 1. Truncate for response (deliberative tools are exempt — their whole
+        # purpose is producing long output for the caller to read).
         display_text = result_text
-        if len(result_text) > self.MAX_TOOL_RESULT_SIZE:
+        if (
+            tool_name not in self.DELIBERATIVE_TOOLS
+            and len(result_text) > self.MAX_TOOL_RESULT_SIZE
+        ):
             first_part = result_text[:500]
             last_part = result_text[-200:] if len(result_text) > 700 else ""
             truncated_note = f"\n\n... [RESULT TRUNCATED: {len(result_text)} chars total, saved to memory] ...\n\n"

@@ -796,7 +796,7 @@ Provide:
     result = server.glm.explore(
         question=f"Summarize file: {arguments['file_path']}",
         context=prompt,
-        max_tokens=512
+        max_tokens=2048
     )
 
     return f"**GLM Summary:**\n\n{result}"
@@ -820,7 +820,7 @@ Can you suggest an alternative approach? Keep it practical and concise."""
     result = server.glm.explore(
         question="Alternative approach",
         context=prompt,
-        max_tokens=512
+        max_tokens=2048
     )
 
     return f"**GLM's Alternative:**\n\n{result}\n\n**YOU (Claude)** should evaluate this and decide whether to adopt it."
@@ -844,7 +844,7 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
     result = server.glm.explore(
         question="Risk check",
         context=prompt,
-        max_tokens=512
+        max_tokens=2048
     )
 
     return f"**GLM's Risk Assessment:**\n\n{result}\n\n**YOU (Claude)** should validate which risks are real and prioritize them."
@@ -860,7 +860,7 @@ def handle_brainstorm(server, arguments: dict) -> str:
     result = server.glm.brainstorm(
         challenge=server._truncate_for_glm(challenge, 5000),
         context=server._truncate_for_glm(context, 5000) if context else "",
-        max_tokens=512
+        max_tokens=2048
     )
 
     return f"**GLM's Creative Perspectives:**\n\n{result}\n\n**YOU (Claude)** should evaluate these ideas critically. Adopt what makes sense, discard what doesn't. You make the final decision."
