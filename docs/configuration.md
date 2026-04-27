@@ -26,14 +26,25 @@ This creates a `.mcp.json` file in the project root:
     "claude-collaborator": {
       "type": "stdio",
       "command": "python",
-      "args": ["-m", "claude_collaborator.server"],
+      "args": ["-u", "-m", "claude_collaborator.server"],
       "env": {
-        "CODEBASE_PATH": "C:\\path\\to\\your\\project"
+        "CODEBASE_PATH": "C:\\path\\to\\your\\project",
+        "PYTHONUNBUFFERED": "1"
       }
     }
   }
 }
 ```
+
+> **Windows note:** Use `python` (or the absolute path to `python.exe`) as
+> the `command`. **Do not use `py`** — Windows' Python launcher stays alive
+> as a parent process forwarding stdio between the MCP host and the actual
+> interpreter, and it adds a pipe-buffer layer that can hold responses
+> indefinitely. Symptoms: tool calls appear to hang for minutes, the host
+> times out and silently respawns the server, and you see "no codebase
+> selected" errors after a successful `switch_codebase`. The `-u` arg and
+> `PYTHONUNBUFFERED=1` env are belt-and-braces against any other buffering
+> layer; both are safe to include.
 
 ### Claude Desktop
 
@@ -47,10 +58,11 @@ Add to your Claude Desktop config:
   "mcpServers": {
     "claude-collaborator": {
       "command": "python",
-      "args": ["-m", "claude_collaborator.server"],
+      "args": ["-u", "-m", "claude_collaborator.server"],
       "env": {
         "CODEBASE_PATH": "C:\\path\\to\\your\\project",
-        "GLM_API_KEY": "your_api_key_here"
+        "GLM_API_KEY": "your_api_key_here",
+        "PYTHONUNBUFFERED": "1"
       }
     }
   }
@@ -120,6 +132,8 @@ Settings are loaded in this order (later sources override earlier ones):
 | `MEMORY_PATH` | Memory storage path |
 | `EMBEDDING_MODEL` | Embedding model for semantic search |
 | `AUTO_GLM_ENRICH` | Enable GLM auto-enrich (true/false) |
+| `PYTHONUNBUFFERED` | Set to `1` to force unbuffered stdout (recommended for stdio MCP transport) |
+| `CLAUDE_COLLAB_DEBUG` | Set to `1` to enable verbose tool-call tracing to `%TEMP%/claude_collaborator_debug.log` and a 30 s GLM-stream watchdog that dumps thread stacks. Off by default. |
 
 ## Auto-Detection
 
@@ -163,3 +177,41 @@ pip install claude-collaborator[glm]
 ### Tools not appearing
 - **Claude Code**: Run `claude mcp list` to check server status
 - **Claude Desktop**: Restart after config changes
+
+### Tool calls hang for minutes / "session stopped responding" / "no codebase selected" after a successful switch_codebase
+
+These symptoms usually share one of two root causes:
+
+1. **Duplicate MCP server registration.** The same `claude-collaborator`
+   server is defined in more than one config file (e.g. both
+   `~/.claude.json` and `~/.claude/mcp.json`, or both a global config and
+   a project-level `.mcp.json`). The MCP host spawns one server per
+   registration; each has its own state, and tool calls round-robin
+   between them. Audit with `claude mcp list` and remove duplicates.
+
+2. **Stdio buffering.** The server's response sits in a pipe buffer and
+   never reaches the host. Make sure your config has `-u` in `args` AND
+   `"PYTHONUNBUFFERED": "1"` in `env`. On Windows, **do not use the `py`
+   launcher** — call `python` (or an absolute path to `python.exe`)
+   directly.
+
+To get a precise diagnosis, set `CLAUDE_COLLAB_DEBUG=1` in the server's
+`env` block, restart the host, reproduce the hang, then read
+`%TEMP%\claude_collaborator_debug.log`. Each tool-call lifecycle event is
+logged with timestamps and PID. If the GLM stream itself hangs, a built-in
+watchdog dumps every Python thread's stack after 30 s of silence so you
+can see exactly where the SDK is blocked.
+
+### Reproducing transport hangs deterministically
+
+`tests/test_brainstorm_repro.py` drives the MCP server end-to-end via the
+official `mcp` Python client and times a brainstorm call. Run it with:
+
+```bash
+python -u tests/test_brainstorm_repro.py
+```
+
+Exit code `0` = brainstorm completed under 180 s. Exit code `1` =
+exceeded the 600 s hard timeout (real hang). If this passes but Claude
+Code still hangs, the issue is host-specific (e.g. a duplicate
+registration or a buffering middleman) and not the server.

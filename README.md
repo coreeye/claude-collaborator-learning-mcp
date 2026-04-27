@@ -54,13 +54,21 @@ pip install -e ".[all]"
 
 Register globally:
 ```bash
-claude mcp add --scope user claude-collaborator -- python -m claude_collaborator.server
+claude mcp add --scope user claude-collaborator -- python -u -m claude_collaborator.server
 ```
 
 Or project-only:
 ```bash
-claude mcp add --scope project claude-collaborator -- python -m claude_collaborator.server
+claude mcp add --scope project claude-collaborator -- python -u -m claude_collaborator.server
 ```
+
+> **Windows note:** Always invoke `python` (or the absolute path to
+> `python.exe`) directly. **Do not use the `py` launcher** — it forwards
+> stdio through a parent process and adds a buffer layer that can hang
+> tool-call responses indefinitely. The `-u` flag, plus
+> `PYTHONUNBUFFERED=1` in the env block, ensures the server's stdout is
+> never buffered. See [docs/configuration.md](docs/configuration.md) for
+> the full env recommendation and troubleshooting.
 
 ### Configure GLM API Key
 
