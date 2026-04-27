@@ -28,7 +28,7 @@ from claude_collaborator.glm_client import GLMClient
 from claude_collaborator.config import load_config
 from claude_collaborator.server_middleware import ServerMiddleware
 from claude_collaborator.tool_definitions import get_all_tools
-from claude_collaborator.tool_handlers import TOOL_HANDLERS, NO_INIT_REQUIRED
+from claude_collaborator.tool_handlers import TOOL_HANDLERS, NO_INIT_REQUIRED, GLM_STREAMING_HANDLERS
 
 # Optional vector memory components
 try:
@@ -251,7 +251,7 @@ class ClaudeCollaboratorServer(ServerMiddleware):
             )
         return True, None
 
-    def _dispatch_tool(self, name: str, arguments: dict) -> list[TextContent]:
+    def _dispatch_tool(self, name: str, arguments: dict, progress_callback=None) -> list[TextContent]:
         """Synchronous tool dispatch — runs in a thread executor to avoid blocking the event loop."""
         # Check if tool requires initialization
         if name not in NO_INIT_REQUIRED:
@@ -263,6 +263,11 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         # Start embedding model warmup on first tool call (AFTER codebase init)
         if self.vector_store and not self.vector_store._warmup_started:
             self.vector_store.ensure_warmup_started()
+
+        def _invoke(handler):
+            if name in GLM_STREAMING_HANDLERS:
+                return handler(self, arguments, progress_callback=progress_callback)
+            return handler(self, arguments)
 
         # Memory/config tools get a fast path: no pre/post processing
         # (no auto-retrieve, no auto-capture, no GLM enrichment, no context tracking)
@@ -277,7 +282,7 @@ class ClaudeCollaboratorServer(ServerMiddleware):
             handler = TOOL_HANDLERS.get(name)
             if not handler:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
-            result_text = handler(self, arguments)
+            result_text = _invoke(handler)
             # Fire GLM enrichment in background for learn/session_learn
             # (non-blocking, just spawns a thread)
             try:
@@ -296,7 +301,7 @@ class ClaudeCollaboratorServer(ServerMiddleware):
             return self._process_tool_result(name, arguments,
                 [TextContent(type="text", text=f"Unknown tool: {name}")])
 
-        result_text = handler(self, arguments)
+        result_text = _invoke(handler)
 
         # Auto-capture for certain tools
         from claude_collaborator.tool_handlers import AUTO_CAPTURE_TOOLS
@@ -305,6 +310,56 @@ class ClaudeCollaboratorServer(ServerMiddleware):
 
         return self._process_tool_result(name, arguments,
             [TextContent(type="text", text=result_text)])
+
+    def _build_progress_callback(self, tool_name: str):
+        """Build a progress_callback that bridges sync GLM streaming chunks
+        back to the asyncio loop and emits MCP progress notifications.
+
+        Always logs to stderr so a stalled stream is visible in server logs.
+        Sends MCP progress notifications only when the caller supplied a
+        progressToken with the request.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        token = None
+        session = None
+        try:
+            ctx = self.app.request_context
+            session = ctx.session
+            meta = ctx.meta
+            if meta is not None:
+                token = getattr(meta, "progressToken", None)
+        except (LookupError, AttributeError):
+            pass
+
+        def progress_callback(piece: str, total_chars: int) -> None:
+            try:
+                print(
+                    f"[glm-stream] {tool_name} +{len(piece)}c (total {total_chars})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception:
+                pass
+            if token is None or session is None or loop is None:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    session.send_progress_notification(
+                        progress_token=token,
+                        progress=float(total_chars),
+                        total=None,
+                        message=piece[-200:],
+                    ),
+                    loop,
+                )
+            except Exception:
+                pass
+
+        return progress_callback
 
     def _register_tools(self):
         """Register all MCP tools"""
@@ -316,11 +371,13 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         @self.app.call_tool()
         async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             try:
+                progress_callback = self._build_progress_callback(name)
+
                 # Run the entire tool dispatch in a thread to avoid blocking
                 # the async event loop (embedding model loading, vector search,
                 # and tool handlers can all block for seconds)
                 return await asyncio.get_event_loop().run_in_executor(
-                    None, self._dispatch_tool, name, arguments
+                    None, self._dispatch_tool, name, arguments, progress_callback
                 )
 
             except Exception as e:

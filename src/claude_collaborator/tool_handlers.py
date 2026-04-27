@@ -189,7 +189,7 @@ def handle_learn(server, arguments: dict) -> str:
     return f"Learned: {topic} (category: {category}, importance: {importance}, {vec_status})"
 
 
-def handle_session_learn(server, arguments: dict) -> str:
+def handle_session_learn(server, arguments: dict, progress_callback=None) -> str:
     summary = arguments["summary"]
     learnings = arguments.get("learnings", [])
     captured_count = 0
@@ -246,7 +246,8 @@ def handle_session_learn(server, arguments: dict) -> str:
             glm_result = server.glm.explore(
                 question="Extract key learnings from this session summary",
                 context=f"Session summary:\n{summary[:4000]}\n\nExtract specific learnings about: codebase patterns, workarounds, user preferences, architecture insights, edge cases. Return each as a bullet point.",
-                max_tokens=2048
+                max_tokens=2048,
+                progress_callback=progress_callback,
             )
             if glm_result and not glm_result.startswith("Error"):
                 if server.vector_store:
@@ -762,7 +763,7 @@ def handle_find_references(server, arguments: dict) -> str:
 # ==================== GLM WORKER TOOLS ====================
 
 
-def handle_summarize_large_file(server, arguments: dict) -> str:
+def handle_summarize_large_file(server, arguments: dict, progress_callback=None) -> str:
     if not server.glm_available:
         return "GLM API key not configured. Add GLM_API_KEY to environment variables or .env file."
 
@@ -796,13 +797,14 @@ Provide:
     result = server.glm.explore(
         question=f"Summarize file: {arguments['file_path']}",
         context=prompt,
-        max_tokens=2048
+        max_tokens=2048,
+        progress_callback=progress_callback,
     )
 
     return f"**GLM Summary:**\n\n{result}"
 
 
-def handle_get_alternative(server, arguments: dict) -> str:
+def handle_get_alternative(server, arguments: dict, progress_callback=None) -> str:
     if not server.glm_available:
         return "GLM API key not configured."
 
@@ -820,13 +822,14 @@ Can you suggest an alternative approach? Keep it practical and concise."""
     result = server.glm.explore(
         question="Alternative approach",
         context=prompt,
-        max_tokens=2048
+        max_tokens=2048,
+        progress_callback=progress_callback,
     )
 
     return f"**GLM's Alternative:**\n\n{result}\n\n**YOU (Claude)** should evaluate this and decide whether to adopt it."
 
 
-def handle_risk_check(server, arguments: dict) -> str:
+def handle_risk_check(server, arguments: dict, progress_callback=None) -> str:
     if not server.glm_available:
         return "GLM API key not configured."
 
@@ -844,13 +847,14 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
     result = server.glm.explore(
         question="Risk check",
         context=prompt,
-        max_tokens=2048
+        max_tokens=2048,
+        progress_callback=progress_callback,
     )
 
     return f"**GLM's Risk Assessment:**\n\n{result}\n\n**YOU (Claude)** should validate which risks are real and prioritize them."
 
 
-def handle_brainstorm(server, arguments: dict) -> str:
+def handle_brainstorm(server, arguments: dict, progress_callback=None) -> str:
     if not server.glm_available:
         return "GLM API key not configured. Brainstorm requires GLM."
 
@@ -860,13 +864,14 @@ def handle_brainstorm(server, arguments: dict) -> str:
     result = server.glm.brainstorm(
         challenge=server._truncate_for_glm(challenge, 5000),
         context=server._truncate_for_glm(context, 5000) if context else "",
-        max_tokens=2048
+        max_tokens=2048,
+        progress_callback=progress_callback,
     )
 
     return f"**GLM's Creative Perspectives:**\n\n{result}\n\n**YOU (Claude)** should evaluate these ideas critically. Adopt what makes sense, discard what doesn't. You make the final decision."
 
 
-def handle_code_review(server, arguments: dict) -> str:
+def handle_code_review(server, arguments: dict, progress_callback=None) -> str:
     if not server.glm_available:
         return "GLM API key not configured."
 
@@ -878,6 +883,7 @@ def handle_code_review(server, arguments: dict) -> str:
         code=server._truncate_for_glm(code, 8000),
         file_path=file_path,
         focus=focus,
+        progress_callback=progress_callback,
     )
 
     return f"**GLM Code Review:**\n\n{result}\n\n**YOU (Claude)** should evaluate these suggestions and apply the ones that make sense."
@@ -1033,4 +1039,10 @@ NO_INIT_REQUIRED = {"get_config", "switch_codebase", "list_codebases"}
 # Tools that auto-capture results to memory
 AUTO_CAPTURE_TOOLS = {
     "get_alternative", "risk_check", "brainstorm", "code_review",
+}
+
+# Handlers that accept a progress_callback kwarg for GLM streaming
+GLM_STREAMING_HANDLERS = {
+    "summarize_large_file", "get_alternative", "risk_check",
+    "brainstorm", "code_review", "session_learn",
 }

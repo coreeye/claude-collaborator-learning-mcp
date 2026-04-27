@@ -3,12 +3,18 @@ GLM Client for AI Research Tasks
 Handles communication with GLM-5.1 API
 """
 
+import concurrent.futures
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+
+_STREAM_END = object()
+
+ProgressCallback = Callable[[str, int], None]
 
 
 class GLMClient:
@@ -19,16 +25,80 @@ class GLMClient:
         self.api_key = os.getenv("GLM_API_KEY")
         self.model = os.getenv("GLM_MODEL", "glm-5.1")
         self.base_url = "https://api.z.ai/api/paas/v4"
-        self.timeout = 120  # 120 second timeout for API calls
+        self.timeout = 120  # 120 second wall-clock timeout for API calls
+        self.idle_timeout = 30  # per-chunk no-data timeout for streams
 
         if not self.api_key:
             raise ValueError("GLM_API_KEY not found in environment variables")
+
+    def _stream_completion(
+        self,
+        client_call: Callable[[], Any],
+        progress_callback: Optional[ProgressCallback],
+        prefer_content_over_reasoning: bool = True,
+    ) -> str:
+        """Run a streaming chat-completion call and return the accumulated text.
+
+        Pulls each chunk inside a single-worker thread pool so we can apply a
+        per-chunk idle timeout without depending on SDK keep-alives. Both the
+        zai SDK and openai-compat path emit chunks with the same shape.
+        """
+        stream = client_call()
+        iterator = iter(stream)
+
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        total_chars = 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            while True:
+                future = ex.submit(next, iterator, _STREAM_END)
+                try:
+                    chunk = future.result(timeout=self.idle_timeout)
+                except concurrent.futures.TimeoutError:
+                    raise RuntimeError(
+                        f"GLM stream stalled (no data for {self.idle_timeout}s)"
+                    )
+
+                if chunk is _STREAM_END:
+                    break
+
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+
+                delta = choices[0].delta
+                piece_content = getattr(delta, "content", None) or ""
+                piece_reason = getattr(delta, "reasoning_content", None) or ""
+
+                if piece_content:
+                    content_parts.append(piece_content)
+                    total_chars += len(piece_content)
+                    piece = piece_content
+                elif piece_reason:
+                    reasoning_parts.append(piece_reason)
+                    total_chars += len(piece_reason)
+                    piece = piece_reason
+                else:
+                    continue
+
+                if progress_callback is not None:
+                    try:
+                        progress_callback(piece, total_chars)
+                    except Exception:
+                        pass
+
+        if prefer_content_over_reasoning:
+            return "".join(content_parts) if content_parts else "".join(reasoning_parts)
+        else:
+            return "".join(content_parts) or "".join(reasoning_parts)
 
     def explore(
         self,
         question: str,
         context: str = "",
-        max_tokens: int = 2048
+        max_tokens: int = 2048,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """
         Ask GLM to explore a codebase question
@@ -37,6 +107,7 @@ class GLMClient:
             question: The exploration question
             context: Additional code context or snippets
             max_tokens: Maximum response tokens
+            progress_callback: Optional callable(chunk_text, total_chars)
 
         Returns:
             GLM's analysis
@@ -46,7 +117,6 @@ class GLMClient:
 
             client = ZaiClient(api_key=self.api_key)
 
-            # Build prompt
             prompt = f"""You are a codebase research assistant. Analyze the following question about a codebase.
 
 Question: {question}
@@ -61,33 +131,27 @@ Provide a comprehensive analysis including:
 
 Be specific and reference code elements when possible."""
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=max_tokens,
-                temperature=1.0,
-                timeout=self.timeout
+            return self._stream_completion(
+                lambda: client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=1.0,
+                    timeout=self.timeout,
+                    stream=True,
+                ),
+                progress_callback,
             )
 
-            # GLM-5.1 puts reasoning in reasoning_content field
-            message = response.choices[0].message
-            content = message.content or message.reasoning_content or ""
-            return content
-
         except ImportError:
-            # Fallback to OpenAI-compatible API
-            return self._explore_openai_compat(question, context, max_tokens)
+            return self._explore_openai_compat(question, context, max_tokens, progress_callback)
 
     def _explore_openai_compat(
         self,
         question: str,
         context: str,
-        max_tokens: int
+        max_tokens: int,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """Use OpenAI-compatible API for GLM"""
         try:
@@ -112,23 +176,17 @@ Provide a comprehensive analysis including:
 
 Be specific and reference code elements when possible."""
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=max_tokens,
-                temperature=1.0,
-                timeout=self.timeout
+            return self._stream_completion(
+                lambda: client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=1.0,
+                    timeout=self.timeout,
+                    stream=True,
+                ),
+                progress_callback,
             )
-
-            # GLM-5.1 puts reasoning in reasoning_content field
-            message = response.choices[0].message
-            content = message.content or message.reasoning_content or ""
-            return content
 
         except Exception as e:
             return f"Error calling GLM API: {str(e)}"
@@ -137,7 +195,8 @@ Be specific and reference code elements when possible."""
         self,
         code1: str,
         code2: str,
-        labels: Optional[List[str]] = None
+        labels: Optional[List[str]] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """
         Compare two code sections
@@ -146,6 +205,7 @@ Be specific and reference code elements when possible."""
             code1: First code section
             code2: Second code section
             labels: Optional labels for the sections
+            progress_callback: Optional callable(chunk_text, total_chars)
 
         Returns:
             Comparison analysis
@@ -176,18 +236,17 @@ Provide:
 3. Which approach is better and why
 4. Any recommendations"""
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048,
-                temperature=1.0,
-                timeout=self.timeout
+            return self._stream_completion(
+                lambda: client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=2048,
+                    temperature=1.0,
+                    timeout=self.timeout,
+                    stream=True,
+                ),
+                progress_callback,
             )
-
-            # GLM-5.1 puts reasoning in reasoning_content field
-            message = response.choices[0].message
-            content = message.content or message.reasoning_content or ""
-            return content
 
         except Exception as e:
             return f"Error comparing code: {str(e)}"
@@ -196,7 +255,8 @@ Provide:
         self,
         topic: str,
         code_files: Dict[str, str],
-        focus_areas: Optional[List[str]] = None
+        focus_areas: Optional[List[str]] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """
         Perform deep dive analysis on a topic
@@ -205,6 +265,7 @@ Provide:
             topic: Topic to analyze
             code_files: Dictionary of filenames to code content
             focus_areas: Specific areas to focus on
+            progress_callback: Optional callable(chunk_text, total_chars)
 
         Returns:
             Comprehensive analysis
@@ -214,7 +275,6 @@ Provide:
 
             client = ZaiClient(api_key=self.api_key)
 
-            # Build prompt with code files
             files_section = ""
             for filename, content in code_files.items():
                 files_section += f"\nFile: {filename}\n```\n{content}\n```\n"
@@ -235,18 +295,17 @@ Provide a comprehensive analysis including:
 4. Potential issues or improvements
 5. How this integrates with the broader codebase"""
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=4096,
-                temperature=1.0,
-                timeout=self.timeout
+            return self._stream_completion(
+                lambda: client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=4096,
+                    temperature=1.0,
+                    timeout=self.timeout,
+                    stream=True,
+                ),
+                progress_callback,
             )
-
-            # GLM-5.1 puts reasoning in reasoning_content field
-            message = response.choices[0].message
-            content = message.content or message.reasoning_content or ""
-            return content
 
         except Exception as e:
             return f"Error performing deep dive: {str(e)}"
@@ -255,7 +314,8 @@ Provide a comprehensive analysis including:
         self,
         challenge: str,
         context: str = "",
-        max_tokens: int = 2048
+        max_tokens: int = 2048,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """
         Creative brainstorming - think divergently about a challenge.
@@ -267,6 +327,7 @@ Provide a comprehensive analysis including:
             challenge: The problem, decision, or plan to brainstorm about
             context: Additional code context or background
             max_tokens: Maximum response tokens
+            progress_callback: Optional callable(chunk_text, total_chars)
 
         Returns:
             GLM's creative perspectives
@@ -291,26 +352,27 @@ Think creatively and provide:
 
 Don't just validate the obvious approach. Push boundaries and surface ideas that a single perspective might miss. Be specific and actionable."""
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=1.0,
-                timeout=self.timeout
+            return self._stream_completion(
+                lambda: client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=1.0,
+                    timeout=self.timeout,
+                    stream=True,
+                ),
+                progress_callback,
             )
 
-            message = response.choices[0].message
-            content = message.content or message.reasoning_content or ""
-            return content
-
         except ImportError:
-            return self._brainstorm_openai_compat(challenge, context, max_tokens)
+            return self._brainstorm_openai_compat(challenge, context, max_tokens, progress_callback)
 
     def _brainstorm_openai_compat(
         self,
         challenge: str,
         context: str,
-        max_tokens: int
+        max_tokens: int,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """Use OpenAI-compatible API for brainstorming"""
         try:
@@ -336,17 +398,17 @@ Think creatively and provide:
 
 Don't just validate the obvious approach. Push boundaries and surface ideas that a single perspective might miss. Be specific and actionable."""
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=1.0,
-                timeout=self.timeout
+            return self._stream_completion(
+                lambda: client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=1.0,
+                    timeout=self.timeout,
+                    stream=True,
+                ),
+                progress_callback,
             )
-
-            message = response.choices[0].message
-            content = message.content or message.reasoning_content or ""
-            return content
 
         except Exception as e:
             return f"Error brainstorming: {str(e)}"
@@ -356,7 +418,8 @@ Don't just validate the obvious approach. Push boundaries and surface ideas that
         code: str,
         file_path: str = "",
         focus: str = "",
-        max_tokens: int = 1024
+        max_tokens: int = 1024,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """
         Review code for quality, best practices, and potential improvements.
@@ -366,6 +429,7 @@ Don't just validate the obvious approach. Push boundaries and surface ideas that
             file_path: Optional file path for context
             focus: Optional specific focus areas
             max_tokens: Maximum response tokens
+            progress_callback: Optional callable(chunk_text, total_chars)
 
         Returns:
             GLM's code review findings
@@ -405,30 +469,28 @@ Output format - for each issue, one bullet:
 
 Output ONLY the bullet list. No preamble, no analysis steps, no numbering of your thought process."""
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=1.0,
-                timeout=self.timeout
+            return self._stream_completion(
+                lambda: client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=1.0,
+                    timeout=self.timeout,
+                    stream=True,
+                ),
+                progress_callback,
             )
 
-            message = response.choices[0].message
-            # Prefer content (final answer) over reasoning_content (chain-of-thought)
-            content = message.content or ""
-            if not content.strip():
-                content = getattr(message, "reasoning_content", "") or ""
-            return content
-
         except ImportError:
-            return self._code_review_openai_compat(code, file_path, focus, max_tokens)
+            return self._code_review_openai_compat(code, file_path, focus, max_tokens, progress_callback)
 
     def _code_review_openai_compat(
         self,
         code: str,
         file_path: str,
         focus: str,
-        max_tokens: int
+        max_tokens: int,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """Use OpenAI-compatible API for code review"""
         try:
@@ -469,19 +531,17 @@ Output format - for each issue, one bullet:
 
 Output ONLY the bullet list. No preamble, no analysis steps, no numbering of your thought process."""
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=1.0,
-                timeout=self.timeout
+            return self._stream_completion(
+                lambda: client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=1.0,
+                    timeout=self.timeout,
+                    stream=True,
+                ),
+                progress_callback,
             )
-
-            message = response.choices[0].message
-            content = message.content or ""
-            if not content.strip():
-                content = getattr(message, "reasoning_content", "") or ""
-            return content
 
         except Exception as e:
             return f"Error reviewing code: {str(e)}"
