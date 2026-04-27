@@ -5,6 +5,9 @@ Handles communication with GLM-5.1 API
 
 import concurrent.futures
 import os
+import sys
+import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from dotenv import load_dotenv
 
@@ -15,6 +18,30 @@ load_dotenv()
 _STREAM_END = object()
 
 ProgressCallback = Callable[[str, int], None]
+
+
+# ---- debug trace logger (mirrors server.py's) ----------------------------
+# OFF by default. Enable with CLAUDE_COLLAB_DEBUG=1 in the MCP server env.
+# Also gates the watchdog in _stream_completion that dumps thread stacks.
+_DEBUG_ENABLED = os.environ.get("CLAUDE_COLLAB_DEBUG", "").lower() in ("1", "true", "yes")
+_DEBUG_LOG_PATH = Path(os.environ.get("TEMP", os.environ.get("TMP", "."))) / "claude_collaborator_debug.log"
+
+
+def _trace(*parts) -> None:
+    if not _DEBUG_ENABLED:
+        return
+    msg = " ".join(str(p) for p in parts)
+    line = f"{time.strftime('%H:%M:%S')}.{int((time.time()%1)*1000):03d} pid={os.getpid()} {msg}\n"
+    try:
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass
+    try:
+        print(line.rstrip("\n"), file=sys.stderr, flush=True)
+    except Exception:
+        pass
+# --------------------------------------------------------------------------
 
 
 class GLMClient:
@@ -43,12 +70,47 @@ class GLMClient:
         per-chunk idle timeout without depending on SDK keep-alives. Both the
         zai SDK and openai-compat path emit chunks with the same shape.
         """
-        stream = client_call()
+        _trace("_stream_completion ENTRY about to call client (open stream)")
+        t0 = time.monotonic()
+
+        # Watchdog: if client_call() hangs for >30s, dump every thread's stack
+        # so we can see WHERE the SDK is blocked. Gated on CLAUDE_COLLAB_DEBUG
+        # so we don't spawn a thread per call in production.
+        opened_event = None
+        if _DEBUG_ENABLED:
+            import threading, traceback as _tb
+            opened_event = threading.Event()
+
+            def _watchdog():
+                if opened_event.wait(timeout=30):
+                    return  # opened in time, all good
+                try:
+                    _trace("=== WATCHDOG: client_call() not returned after 30s, dumping all thread stacks ===")
+                    frames = sys._current_frames()
+                    for tid, frame in frames.items():
+                        _trace(f"--- thread {tid} ---")
+                        for line in _tb.format_stack(frame):
+                            for sub in line.rstrip().split("\n"):
+                                _trace(f"    {sub}")
+                    _trace("=== WATCHDOG end ===")
+                except Exception as e:
+                    _trace(f"WATCHDOG itself raised: {type(e).__name__}: {e}")
+
+            threading.Thread(target=_watchdog, name="GLMWatchdog", daemon=True).start()
+
+        try:
+            stream = client_call()
+        finally:
+            if opened_event is not None:
+                opened_event.set()
+        _trace(f"_stream_completion stream opened in {time.monotonic()-t0:.2f}s")
         iterator = iter(stream)
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         total_chars = 0
+        chunks_seen = 0
+        first_chunk_at: Optional[float] = None
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             while True:
@@ -56,12 +118,19 @@ class GLMClient:
                 try:
                     chunk = future.result(timeout=self.idle_timeout)
                 except concurrent.futures.TimeoutError:
+                    _trace(f"_stream_completion STALL after {chunks_seen} chunks ({total_chars} chars)")
                     raise RuntimeError(
                         f"GLM stream stalled (no data for {self.idle_timeout}s)"
                     )
 
                 if chunk is _STREAM_END:
+                    _trace(f"_stream_completion stream END after {chunks_seen} chunks ({total_chars} chars)")
                     break
+
+                chunks_seen += 1
+                if first_chunk_at is None:
+                    first_chunk_at = time.monotonic()
+                    _trace(f"_stream_completion first chunk at +{first_chunk_at-t0:.2f}s")
 
                 choices = getattr(chunk, "choices", None)
                 if not choices:
@@ -85,9 +154,11 @@ class GLMClient:
                 if progress_callback is not None:
                     try:
                         progress_callback(piece, total_chars)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _trace(f"_stream_completion progress_callback raised: {type(e).__name__}: {e}")
 
+        elapsed = time.monotonic() - t0
+        _trace(f"_stream_completion EXIT after {elapsed:.2f}s ({chunks_seen} chunks, {total_chars} chars)")
         if prefer_content_over_reasoning:
             return "".join(content_parts) if content_parts else "".join(reasoning_parts)
         else:

@@ -7,10 +7,44 @@ Generic, configurable - works with any C# codebase.
 """
 
 import asyncio
+import os
+import time
 import sys
 import traceback
 from pathlib import Path
 from typing import Optional
+
+
+# ---- debug trace logger ---------------------------------------------------
+# Writes a timestamped line to a file in TEMP for every key step in the
+# tool-call lifecycle. Survives stderr being captured/dropped by the MCP host.
+# Each line is flushed immediately so a hung process leaves a usable trail.
+#
+# OFF by default. Enable by setting CLAUDE_COLLAB_DEBUG=1 in the MCP server's
+# env block (e.g. in ~/.claude.json or ~/.claude/mcp.json). When off, _trace
+# is a cheap no-op so this code path costs nothing in production.
+_DEBUG_ENABLED = os.environ.get("CLAUDE_COLLAB_DEBUG", "").lower() in ("1", "true", "yes")
+_DEBUG_LOG_PATH = Path(os.environ.get("TEMP", os.environ.get("TMP", "."))) / "claude_collaborator_debug.log"
+
+
+def _trace(*parts) -> None:
+    if not _DEBUG_ENABLED:
+        return
+    msg = " ".join(str(p) for p in parts)
+    line = f"{time.strftime('%H:%M:%S')}.{int((time.time()%1)*1000):03d} pid={os.getpid()} {msg}\n"
+    try:
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass
+    try:
+        print(line.rstrip("\n"), file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+_trace("server.py module imported")
+# --------------------------------------------------------------------------
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -253,18 +287,22 @@ class ClaudeCollaboratorServer(ServerMiddleware):
 
     def _dispatch_tool(self, name: str, arguments: dict, progress_callback=None) -> list[TextContent]:
         """Synchronous tool dispatch — runs in a thread executor to avoid blocking the event loop."""
+        _trace(f"_dispatch_tool ENTRY name={name}")
         # Check if tool requires initialization
         if name not in NO_INIT_REQUIRED:
             is_ready, error_msg = self._check_initialized()
             if not is_ready:
+                _trace(f"_dispatch_tool name={name} init NOT ready: {error_msg[:100]}")
                 return self._process_tool_result(name, arguments,
                     [TextContent(type="text", text=error_msg)])
 
         # Start embedding model warmup on first tool call (AFTER codebase init)
         if self.vector_store and not self.vector_store._warmup_started:
+            _trace(f"_dispatch_tool name={name} starting warmup")
             self.vector_store.ensure_warmup_started()
 
         def _invoke(handler):
+            _trace(f"_invoke handler name={name} streaming={name in GLM_STREAMING_HANDLERS}")
             if name in GLM_STREAMING_HANDLERS:
                 return handler(self, arguments, progress_callback=progress_callback)
             return handler(self, arguments)
@@ -315,10 +353,18 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         """Build a progress_callback that bridges sync GLM streaming chunks
         back to the asyncio loop and emits MCP progress notifications.
 
+        Throttled. GLM-5.1 emits one chunk per token (~2000 chunks per
+        brainstorm call); firing one MCP notification per chunk floods the
+        stdio transport and overwhelms the client. We only emit a notification
+        at most once per PROGRESS_INTERVAL_SEC, regardless of chunk count.
+
         Always logs to stderr so a stalled stream is visible in server logs.
         Sends MCP progress notifications only when the caller supplied a
         progressToken with the request.
         """
+        PROGRESS_INTERVAL_SEC = 1.0  # at most one notification per second per call
+        STDERR_INTERVAL_SEC = 5.0    # at most one stderr line per 5 seconds per call
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -335,19 +381,30 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         except (LookupError, AttributeError):
             pass
 
+        _trace(f"_build_progress_callback name={tool_name} token={token!r} has_session={session is not None} has_loop={loop is not None}")
+
+        # Mutable single-element holders so the closure can update them
+        # without nonlocal declarations on each call.
+        last_notification = [0.0]
+        last_stderr = [0.0]
+        first_chunk_logged = [False]
+        notify_count = [0]
+
         def progress_callback(piece: str, total_chars: int) -> None:
-            try:
-                print(
-                    f"[glm-stream] {tool_name} +{len(piece)}c (total {total_chars})",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            except Exception:
-                pass
+            now = time.monotonic()
+            if not first_chunk_logged[0]:
+                first_chunk_logged[0] = True
+                _trace(f"progress_callback FIRST chunk name={tool_name} total={total_chars}")
+            if now - last_stderr[0] >= STDERR_INTERVAL_SEC:
+                last_stderr[0] = now
+                _trace(f"progress_callback name={tool_name} streaming total={total_chars}")
             if token is None or session is None or loop is None:
                 return
+            if now - last_notification[0] < PROGRESS_INTERVAL_SEC:
+                return
+            last_notification[0] = now
             try:
-                asyncio.run_coroutine_threadsafe(
+                fut = asyncio.run_coroutine_threadsafe(
                     session.send_progress_notification(
                         progress_token=token,
                         progress=float(total_chars),
@@ -356,8 +413,11 @@ class ClaudeCollaboratorServer(ServerMiddleware):
                     ),
                     loop,
                 )
-            except Exception:
-                pass
+                notify_count[0] += 1
+                if notify_count[0] in (1, 5, 20, 50):
+                    _trace(f"progress_callback name={tool_name} notification #{notify_count[0]} scheduled (total={total_chars})")
+            except Exception as e:
+                _trace(f"progress_callback name={tool_name} notification FAILED: {type(e).__name__}: {e}")
 
         return progress_callback
 
@@ -370,17 +430,23 @@ class ClaudeCollaboratorServer(ServerMiddleware):
 
         @self.app.call_tool()
         async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+            _trace(f"call_tool ENTRY name={name} keys={list(arguments.keys())}")
             try:
                 progress_callback = self._build_progress_callback(name)
+                _trace(f"call_tool name={name} progress_callback built")
 
                 # Run the entire tool dispatch in a thread to avoid blocking
                 # the async event loop (embedding model loading, vector search,
                 # and tool handlers can all block for seconds)
-                return await asyncio.get_event_loop().run_in_executor(
+                _trace(f"call_tool name={name} dispatching to executor")
+                result = await asyncio.get_event_loop().run_in_executor(
                     None, self._dispatch_tool, name, arguments, progress_callback
                 )
+                _trace(f"call_tool name={name} EXIT ok ({sum(len(getattr(c,'text','')) for c in result)} chars)")
+                return result
 
             except Exception as e:
+                _trace(f"call_tool name={name} EXIT ERROR {type(e).__name__}: {e}")
                 return self._process_tool_result(name, arguments,
                     [TextContent(type="text", text=f"Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}")])
 
