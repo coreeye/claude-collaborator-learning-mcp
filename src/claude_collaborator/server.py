@@ -461,23 +461,55 @@ class ClaudeCollaboratorServer(ServerMiddleware):
 
 
 def main():
-    """Main entry point"""
-    # Pre-load the embedding model BEFORE starting the async event loop.
-    # SentenceTransformer + torch imports can deadlock when loaded in a
-    # background thread while an asyncio event loop is running.
+    """Main entry point.
+
+    The MCP startup handshake must complete fast (Claude Code's client times
+    out after ~10-15s). The embedding model takes ~8s to load on a warm disk
+    and 20-30s on a cold one, which used to block the handshake.
+
+    Resilient startup strategy:
+      1. Eagerly *import* the VectorStore module on the main thread so that
+         torch and sentence_transformers C extensions finish their import-time
+         initialization here (background-thread imports of torch have been
+         observed to deadlock against the asyncio event loop).
+      2. Spawn the actual *model file load* in a daemon thread before
+         asyncio.run(). The MCP server starts immediately; the model finishes
+         loading in parallel. If a semantic-search tool fires before warmup
+         completes, that single call waits — every other tool is unaffected.
+
+    Net effect: handshake completes in <1s regardless of disk cache state.
+    """
     import os
+    import threading
+    import time as _time
+
     codebase = os.environ.get("CODEBASE_PATH")
     if codebase:
+        # Eager import on main thread — completes any C-level torch init
+        # safely before asyncio is running.
         try:
             from claude_collaborator.memory_vector import VectorStore
-            vs = VectorStore(codebase)
-            if vs._check_embedding_available():
-                print("[main] Pre-loading embedding model...", file=sys.stderr, flush=True)
-                vs._get_embedding_model()
-                print("[main] Embedding model ready", file=sys.stderr, flush=True)
-                VectorStore._preloaded_model = vs._embedding_model
-        except Exception as e:
-            print(f"[main] Embedding pre-load failed: {e}", file=sys.stderr, flush=True)
+        except ImportError:
+            VectorStore = None
+
+        if VectorStore is not None:
+            def _preload_embedding_model():
+                try:
+                    vs = VectorStore(codebase)
+                    if vs._check_embedding_available():
+                        t0 = _time.time()
+                        print("[main] Pre-loading embedding model in background...", file=sys.stderr, flush=True)
+                        vs._get_embedding_model()
+                        print(f"[main] Embedding model ready ({_time.time() - t0:.1f}s)", file=sys.stderr, flush=True)
+                        VectorStore._preloaded_model = vs._embedding_model
+                except Exception as e:
+                    print(f"[main] Embedding pre-load failed: {e}", file=sys.stderr, flush=True)
+
+            threading.Thread(
+                target=_preload_embedding_model,
+                daemon=True,
+                name="embedding-preload",
+            ).start()
 
     server = ClaudeCollaboratorServer()
     asyncio.run(server.run())
