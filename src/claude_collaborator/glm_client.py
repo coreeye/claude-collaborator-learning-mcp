@@ -54,6 +54,10 @@ class GLMClient:
         self.base_url = "https://api.z.ai/api/paas/v4"
         self.timeout = 120  # 120 second wall-clock timeout for API calls
         self.idle_timeout = 30  # per-chunk no-data timeout for streams
+        # Wall-clock cap for the *initial* stream-open call. The SDK's own
+        # timeout is sometimes ignored for stream=True requests, so we enforce
+        # one here ourselves. Overridable via GLM_OPEN_TIMEOUT for ops.
+        self.open_timeout = float(os.getenv("GLM_OPEN_TIMEOUT", "45"))
 
         if not self.api_key:
             raise ValueError("GLM_API_KEY not found in environment variables")
@@ -98,8 +102,33 @@ class GLMClient:
 
             threading.Thread(target=_watchdog, name="GLMWatchdog", daemon=True).start()
 
+        # Open the stream in a worker thread so we can enforce a wall-clock
+        # timeout on the open itself. Without this, a hang inside the SDK's
+        # initial HTTP request (TLS handshake, slow DNS, server stall before
+        # first byte) would block this tool call indefinitely — the
+        # idle_timeout below only kicks in *after* iteration starts, and the
+        # SDK-level timeout is unreliable for stream=True.
         try:
-            stream = client_call()
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="GLMOpen"
+            ) as open_ex:
+                open_future = open_ex.submit(client_call)
+                try:
+                    stream = open_future.result(timeout=self.open_timeout)
+                except concurrent.futures.TimeoutError:
+                    # We can't actually cancel the underlying HTTP call; tell
+                    # the executor not to wait for it on shutdown so we
+                    # return immediately. The worker thread is daemon-like
+                    # within the ThreadPoolExecutor and will exit when the
+                    # SDK finally returns or the process ends.
+                    open_ex.shutdown(wait=False, cancel_futures=True)
+                    _trace(
+                        f"_stream_completion OPEN STALL after {self.open_timeout}s"
+                    )
+                    raise RuntimeError(
+                        f"GLM stream did not open within {self.open_timeout}s "
+                        "(network hang or upstream stall)"
+                    )
         finally:
             if opened_event is not None:
                 opened_event.set()
@@ -114,13 +143,28 @@ class GLMClient:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             while True:
+                # Bound each chunk wait by whichever is smaller: the per-chunk
+                # idle budget, or the time remaining in the overall wall-clock
+                # budget. Without the overall cap a stream that dribbles one
+                # byte every 29s could run forever.
+                remaining = self.timeout - (time.monotonic() - t0)
+                if remaining <= 0:
+                    _trace(
+                        f"_stream_completion WALL-CLOCK timeout after {self.timeout}s "
+                        f"({chunks_seen} chunks, {total_chars} chars)"
+                    )
+                    raise RuntimeError(
+                        f"GLM stream exceeded {self.timeout}s wall-clock budget"
+                    )
+                wait_for = min(self.idle_timeout, remaining)
+
                 future = ex.submit(next, iterator, _STREAM_END)
                 try:
-                    chunk = future.result(timeout=self.idle_timeout)
+                    chunk = future.result(timeout=wait_for)
                 except concurrent.futures.TimeoutError:
                     _trace(f"_stream_completion STALL after {chunks_seen} chunks ({total_chars} chars)")
                     raise RuntimeError(
-                        f"GLM stream stalled (no data for {self.idle_timeout}s)"
+                        f"GLM stream stalled (no data for {wait_for:.0f}s)"
                     )
 
                 if chunk is _STREAM_END:
