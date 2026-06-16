@@ -1034,7 +1034,18 @@ TOOL_HANDLERS = {
 }
 
 # Tools that don't require codebase initialization
-NO_INIT_REQUIRED = {"get_config", "switch_codebase", "list_codebases"}
+# Tools that do NOT require a codebase to be initialized. The pure-GLM advisory
+# tools (brainstorm/get_alternative/risk_check/code_review) only operate on text
+# passed in the arguments — they never touch the codebase — so they must not
+# trigger the (synchronous, potentially multi-minute) lazy codebase init on the
+# dispatch thread. Forcing init here is what made the FIRST brainstorm on a
+# fresh server hang for minutes before the GLM call even started.
+# NOTE: summarize_large_file is deliberately NOT here — it reads files via
+# server.codebase_path and genuinely needs an initialized codebase.
+NO_INIT_REQUIRED = {
+    "get_config", "switch_codebase", "list_codebases",
+    "brainstorm", "get_alternative", "risk_check", "code_review",
+}
 
 # Tools that auto-capture results to memory
 AUTO_CAPTURE_TOOLS = {

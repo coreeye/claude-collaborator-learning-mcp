@@ -48,7 +48,6 @@ class VectorStore:
         self._embedding_model = None
         self._embedding_available = None
         self._warmup_thread = None
-        self._model_lock = __import__('threading').Lock()
 
         self._warmup_started = False
 
@@ -63,6 +62,16 @@ class VectorStore:
     # Cache at module level - check once, use forever
     _ST_AVAILABLE = None
     _ST_CHECKED = False
+
+    # The embedding model is loaded exactly ONCE and shared across every
+    # VectorStore instance. Both main()'s startup preload and the lazy
+    # first-dispatch warmup populate this; the class-level lock guarantees a
+    # single load even when those two race. Previously each instance had its
+    # own _model_lock, so the two warmups could load the model concurrently —
+    # doubling the scipy/sklearn/torch import + load that starves the first
+    # GLM call's connection for the GIL.
+    _preloaded_model = None
+    _LOAD_LOCK = __import__('threading').Lock()
 
     def _check_embedding_available(self) -> bool:
         """Check if sentence-transformers is available (cached result)"""
@@ -124,26 +133,52 @@ class VectorStore:
 
     def is_model_ready(self) -> bool:
         """Check if the embedding model has finished loading (non-blocking)."""
-        return getattr(self, '_model_ready', False) or self._embedding_model is not None
+        return (getattr(self, '_model_ready', False)
+                or self._embedding_model is not None
+                or VectorStore._preloaded_model is not None)
+
+    @classmethod
+    def wait_if_loading(cls, timeout: float = 90.0) -> None:
+        """Block until any in-progress embedding-model load finishes.
+
+        GLM streaming must never run concurrently with the sentence-transformers
+        import/load: that import (scipy/sklearn/torch) is GIL-heavy and starves
+        the streaming thread, delaying the first token by minutes (measured 243s
+        vs ~5s). If the model is already loaded — or no load is happening — this
+        returns immediately. If a load is underway the loader holds _LOAD_LOCK,
+        so acquiring it here blocks only until that load completes (bounded by
+        timeout). Cheap no-op on the common path (one uncontended lock cycle)."""
+        if cls._preloaded_model is not None:
+            return
+        if cls._LOAD_LOCK.acquire(timeout=timeout):
+            cls._LOAD_LOCK.release()
 
     def _get_embedding_model(self):
-        """Get or lazy-load the embedding model (thread-safe)"""
+        """Get or lazy-load the embedding model.
+
+        The actual load happens exactly once process-wide, under the class-level
+        _LOAD_LOCK, and the result is cached on VectorStore._preloaded_model so
+        every instance shares it. Read/write request paths never call this
+        directly while warming (they guard on is_model_ready() and degrade), so
+        the lock is only ever contended by background warmup threads.
+        """
         if not self._check_embedding_available():
             return None
 
-        # Fast path: model already loaded, no lock needed
+        # Fast path: this instance already has the model.
         if self._embedding_model is not None:
             return self._embedding_model
 
-        # Check if model was pre-loaded in main() before asyncio started
-        preloaded = getattr(VectorStore, '_preloaded_model', None)
-        if preloaded is not None:
-            self._embedding_model = preloaded
+        # Reuse a model already loaded by any instance / the main() preload.
+        if VectorStore._preloaded_model is not None:
+            self._embedding_model = VectorStore._preloaded_model
             return self._embedding_model
 
-        # Slow path: load model under lock (prevents duplicate loading)
-        with self._model_lock:
-            if self._embedding_model is None:
+        # Slow path: load exactly once across all instances.
+        with VectorStore._LOAD_LOCK:
+            # Re-check inside the lock — another thread may have loaded it while
+            # we were waiting.
+            if VectorStore._preloaded_model is None:
                 import logging
                 # Suppress logging from model loading libraries
                 for name in ["sentence_transformers", "transformers",
@@ -162,11 +197,25 @@ class VectorStore:
                 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
                 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
                 from sentence_transformers import SentenceTransformer
-                self._embedding_model = SentenceTransformer(
-                    self.embedding_model_name,
-                    trust_remote_code=False
-                )
+                # Load from the local HF cache only. SentenceTransformer
+                # otherwise does a network metadata check against the HF Hub on
+                # every load, which can stall or get rate-limited (turning a ~3s
+                # cache load into minutes — and a slow load is exactly what
+                # starves a concurrent GLM stream). Fall back to a normal
+                # downloading load if the model isn't cached yet (first run).
+                try:
+                    VectorStore._preloaded_model = SentenceTransformer(
+                        self.embedding_model_name,
+                        trust_remote_code=False,
+                        local_files_only=True,
+                    )
+                except Exception:
+                    VectorStore._preloaded_model = SentenceTransformer(
+                        self.embedding_model_name,
+                        trust_remote_code=False,
+                    )
 
+        self._embedding_model = VectorStore._preloaded_model
         return self._embedding_model
 
     def _init_db(self):

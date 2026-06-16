@@ -1,6 +1,8 @@
 """
 GLM Client for AI Research Tasks
-Handles communication with GLM-5.1 API
+Handles communication with the GLM API (z.ai). Model is configurable via
+GLM_MODEL; default glm-5.1. glm-5.2 is the latest model but requires API
+entitlement that not all keys have yet (returns HTTP 403 otherwise).
 """
 
 import concurrent.futures
@@ -45,7 +47,7 @@ def _trace(*parts) -> None:
 
 
 class GLMClient:
-    """Client for GLM-5.1 API"""
+    """Client for the GLM API (z.ai)"""
 
     def __init__(self):
         """Initialize GLM client"""
@@ -57,7 +59,9 @@ class GLMClient:
         # Wall-clock cap for the *initial* stream-open call. The SDK's own
         # timeout is sometimes ignored for stream=True requests, so we enforce
         # one here ourselves. Overridable via GLM_OPEN_TIMEOUT for ops.
-        self.open_timeout = float(os.getenv("GLM_OPEN_TIMEOUT", "45"))
+        # Default leaves headroom for the first call, which can race the
+        # embedding-model import storm for the GIL even after DNS is pre-warmed.
+        self.open_timeout = float(os.getenv("GLM_OPEN_TIMEOUT", "60"))
 
         if not self.api_key:
             raise ValueError("GLM_API_KEY not found in environment variables")
@@ -108,28 +112,31 @@ class GLMClient:
         # first byte) would block this tool call indefinitely — the
         # idle_timeout below only kicks in *after* iteration starts, and the
         # SDK-level timeout is unreliable for stream=True.
+        # NB: do NOT use `with ThreadPoolExecutor(...) as ex` here. The context
+        # manager's __exit__ calls shutdown(wait=True), which re-blocks on the
+        # worker even after we asked for wait=False — and the worker may be
+        # stuck in an un-cancellable blocking call (getaddrinfo / a socket recv
+        # with no timeout). That turns a 60s open-timeout into an unbounded
+        # hang of the whole tool call. We manage the executor manually and only
+        # ever shut down with wait=False, abandoning a stuck worker (it dies
+        # when the SDK finally returns or the process exits).
+        open_ex = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="GLMOpen"
+        )
         try:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="GLMOpen"
-            ) as open_ex:
-                open_future = open_ex.submit(client_call)
-                try:
-                    stream = open_future.result(timeout=self.open_timeout)
-                except concurrent.futures.TimeoutError:
-                    # We can't actually cancel the underlying HTTP call; tell
-                    # the executor not to wait for it on shutdown so we
-                    # return immediately. The worker thread is daemon-like
-                    # within the ThreadPoolExecutor and will exit when the
-                    # SDK finally returns or the process ends.
-                    open_ex.shutdown(wait=False, cancel_futures=True)
-                    _trace(
-                        f"_stream_completion OPEN STALL after {self.open_timeout}s"
-                    )
-                    raise RuntimeError(
-                        f"GLM stream did not open within {self.open_timeout}s "
-                        "(network hang or upstream stall)"
-                    )
+            open_future = open_ex.submit(client_call)
+            try:
+                stream = open_future.result(timeout=self.open_timeout)
+            except concurrent.futures.TimeoutError:
+                _trace(
+                    f"_stream_completion OPEN STALL after {self.open_timeout}s"
+                )
+                raise RuntimeError(
+                    f"GLM stream did not open within {self.open_timeout}s "
+                    "(network hang or upstream stall)"
+                )
         finally:
+            open_ex.shutdown(wait=False, cancel_futures=True)
             if opened_event is not None:
                 opened_event.set()
         _trace(f"_stream_completion stream opened in {time.monotonic()-t0:.2f}s")
@@ -141,7 +148,10 @@ class GLMClient:
         chunks_seen = 0
         first_chunk_at: Optional[float] = None
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        ex = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="GLMChunk"
+        )
+        try:
             while True:
                 # Bound each chunk wait by whichever is smaller: the per-chunk
                 # idle budget, or the time remaining in the overall wall-clock
@@ -200,6 +210,11 @@ class GLMClient:
                         progress_callback(piece, total_chars)
                     except Exception as e:
                         _trace(f"_stream_completion progress_callback raised: {type(e).__name__}: {e}")
+        finally:
+            # Same rationale as the open executor: never wait=True — the next()
+            # worker may be blocked in an un-cancellable socket read, and a
+            # `with` block's __exit__(shutdown(wait=True)) would hang the call.
+            ex.shutdown(wait=False, cancel_futures=True)
 
         elapsed = time.monotonic() - t0
         _trace(f"_stream_completion EXIT after {elapsed:.2f}s ({chunks_seen} chunks, {total_chars} chars)")

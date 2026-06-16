@@ -147,7 +147,7 @@ See [docs/configuration.md](docs/configuration.md) for full details.
 |--------|---------|-------------|
 | `codebase_path` | auto-detected | Path to C# solution |
 | `glm_api_key` | (none) | GLM API key |
-| `glm_model` | `glm-5.1` | GLM model to use |
+| `glm_model` | `glm-5.1` | GLM model to use (`glm-5.2` is newer but needs API entitlement) |
 | `embedding_model` | `all-MiniLM-L6-v2` | Embedding model for semantic search |
 | `auto_glm_enrich` | `true` | Enable background GLM enrichment |
 

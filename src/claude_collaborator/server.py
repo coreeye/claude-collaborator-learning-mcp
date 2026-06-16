@@ -304,6 +304,11 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         def _invoke(handler):
             _trace(f"_invoke handler name={name} streaming={name in GLM_STREAMING_HANDLERS}")
             if name in GLM_STREAMING_HANDLERS:
+                # Never let a GLM stream race the GIL-heavy embedding import/load
+                # (e.g. brainstorm right after a session-start memory search that
+                # kicked off lazy warmup). Bounded wait; no-op once loaded.
+                if VECTOR_MEMORY_AVAILABLE:
+                    VectorStore.wait_if_loading()
                 return handler(self, arguments, progress_callback=progress_callback)
             return handler(self, arguments)
 
@@ -353,7 +358,7 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         """Build a progress_callback that bridges sync GLM streaming chunks
         back to the asyncio loop and emits MCP progress notifications.
 
-        Throttled. GLM-5.1 emits one chunk per token (~2000 chunks per
+        Throttled. GLM emits one chunk per token (~2000 chunks per
         brainstorm call); firing one MCP notification per chunk floods the
         stdio transport and overwhelms the client. We only emit a notification
         at most once per PROGRESS_INTERVAL_SEC, regardless of chunk count.
@@ -463,53 +468,74 @@ class ClaudeCollaboratorServer(ServerMiddleware):
 def main():
     """Main entry point.
 
-    The MCP startup handshake must complete fast (Claude Code's client times
-    out after ~10-15s). The embedding model takes ~8s to load on a warm disk
-    and 20-30s on a cold one, which used to block the handshake.
-
-    Resilient startup strategy:
-      1. Eagerly *import* the VectorStore module on the main thread so that
-         torch and sentence_transformers C extensions finish their import-time
-         initialization here (background-thread imports of torch have been
-         observed to deadlock against the asyncio event loop).
-      2. Spawn the actual *model file load* in a daemon thread before
-         asyncio.run(). The MCP server starts immediately; the model finishes
-         loading in parallel. If a semantic-search tool fires before warmup
-         completes, that single call waits — every other tool is unaffected.
-
-    Net effect: handshake completes in <1s regardless of disk cache state.
+    Startup ordering matters a lot here. The sentence-transformers import
+    (scipy/sklearn/torch) is CPU- and GIL-heavy. If it runs in a background
+    thread once the asyncio loop is live, it contends for the GIL with both the
+    stdio transport loop and any concurrent GLM stream — the first
+    brainstorm/explore call would then take its first token minutes late
+    (measured: 243s in-server vs ~5s for a direct API call). So instead we warm
+    the model SYNCHRONOUSLY on the main thread BEFORE asyncio.run(): a one-time
+    ~15-20s cost (loaded from the local HF cache, no network) that runs with no
+    contention and is fully done before any tool is served. Handshake is delayed
+    by that warm, which MCP clients tolerate; every tool call afterward — GLM or
+    memory — runs against an already-loaded model.
     """
     import os
     import threading
     import time as _time
 
-    codebase = os.environ.get("CODEBASE_PATH")
-    if codebase:
-        # Eager import on main thread — completes any C-level torch init
-        # safely before asyncio is running.
+    # Warm the embedding model SYNCHRONOUSLY on the main thread, before the
+    # asyncio loop starts. The sentence-transformers import (scipy/sklearn/torch)
+    # is GIL-heavy; done here (single-threaded, pre-loop) it is a one-time
+    # ~15-20s cost with no contention, and it then NEVER competes with a GLM
+    # stream or the stdio transport loop. Loading it lazily in a background
+    # thread instead lets that import contend for the GIL with the event loop
+    # and any concurrent GLM stream, which is what caused first-call brainstorm
+    # to take its first token minutes late. The model load reads from the local
+    # HF cache (local_files_only), so this is fast and never hits the network.
+    if os.environ.get("CODEBASE_PATH"):
         try:
             from claude_collaborator.memory_vector import VectorStore
-        except ImportError:
-            VectorStore = None
+            _vs = VectorStore(os.environ["CODEBASE_PATH"])
+            if _vs._check_embedding_available():
+                _t0 = _time.time()
+                print("[main] warming embedding model (main thread)...", file=sys.stderr, flush=True)
+                _vs._get_embedding_model()  # populates VectorStore._preloaded_model
+                print(f"[main] embedding model ready ({_time.time() - _t0:.1f}s)", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[main] embedding warm skipped: {e}", file=sys.stderr, flush=True)
 
-        if VectorStore is not None:
-            def _preload_embedding_model():
-                try:
-                    vs = VectorStore(codebase)
-                    if vs._check_embedding_available():
-                        t0 = _time.time()
-                        print("[main] Pre-loading embedding model in background...", file=sys.stderr, flush=True)
-                        vs._get_embedding_model()
-                        print(f"[main] Embedding model ready ({_time.time() - t0:.1f}s)", file=sys.stderr, flush=True)
-                        VectorStore._preloaded_model = vs._embedding_model
-                except Exception as e:
-                    print(f"[main] Embedding pre-load failed: {e}", file=sys.stderr, flush=True)
+    # Pre-warm DNS + TCP to the GLM endpoint. The FIRST GLM call (brainstorm/
+    # explore/etc.) otherwise pays a cold getaddrinfo() for api.z.ai *while* the
+    # embedding-model import storm (scipy/sklearn/torch) is hogging the GIL.
+    # That combination has been observed to push the stream-open past
+    # open_timeout — surfacing as a "hang" on the first call that then succeeds
+    # on retry only because DNS is now cached. Priming the resolver here makes
+    # the first real call's connect fast. Best-effort: never blocks, never raises.
+    if os.environ.get("GLM_API_KEY"):
+        def _prewarm_glm_connection():
+            import socket
+            from urllib.parse import urlparse
+            try:
+                host = urlparse("https://api.z.ai/api/paas/v4").hostname or "api.z.ai"
+                infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+                if infos:
+                    af, socktype, proto, _canon, sa = infos[0]
+                    s = socket.socket(af, socktype, proto)
+                    s.settimeout(10)  # per-socket only — never touch the global default
+                    try:
+                        s.connect(sa)
+                    finally:
+                        s.close()
+                print("[main] GLM endpoint pre-warmed (DNS/TCP)", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"[main] GLM pre-warm skipped: {e}", file=sys.stderr, flush=True)
 
-            threading.Thread(
-                target=_preload_embedding_model,
-                daemon=True,
-                name="embedding-preload",
-            ).start()
+        threading.Thread(
+            target=_prewarm_glm_connection,
+            daemon=True,
+            name="glm-prewarm",
+        ).start()
 
     server = ClaudeCollaboratorServer()
     asyncio.run(server.run())

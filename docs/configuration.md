@@ -155,9 +155,13 @@ pip install claude-collaborator[glm]
 
 ### Available Models
 
-- `glm-5.1` - Latest flagship model with deep thinking (default)
-- `glm-4-flash` - Faster responses
+- `glm-5.1` - Flagship model with deep thinking (**default**, verified working)
+- `glm-4.6` - Previous generation, also available
 - `glm-4-plus` - Enhanced capabilities
+- `glm-5.2` - Newest flagship (announced 2026-06-13). Requires API entitlement
+  that is still rolling out to direct-API keys; using it before your key has
+  access returns `HTTP 403 "You do not have permission to access glm-5.2"`.
+  Switch via `GLM_MODEL=glm-5.2` once z.ai enables it for your account.
 
 ## Troubleshooting
 
