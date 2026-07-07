@@ -10,6 +10,7 @@ import asyncio
 import os
 import time
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -95,6 +96,10 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         self.context_tracker = None
         self.file_cache = None
         self.session_state = None
+
+        # Serializes lazy codebase init so the startup background-warmup thread
+        # and the first tool dispatch can't both initialize concurrently.
+        self._init_lock = threading.Lock()
 
         # Initialize middleware (auto-capture, GLM enrich, etc.)
         self._init_middleware()
@@ -186,12 +191,17 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         if not self._configured_codebase_path:
             return
 
-        try:
-            self._initialize_codebase(Path(self._configured_codebase_path))
-        except Exception as e:
-            print(f"Warning: Could not initialize codebase: {e}", file=sys.stderr)
-            print(f"  Path was: {self._configured_codebase_path}", file=sys.stderr)
-            print(f"  Use switch_codebase() to select a codebase manually.", file=sys.stderr)
+        with self._init_lock:
+            # Re-check inside the lock: the startup warmup thread may have
+            # initialized while we waited.
+            if self.codebase_path is not None:
+                return
+            try:
+                self._initialize_codebase(Path(self._configured_codebase_path))
+            except Exception as e:
+                print(f"Warning: Could not initialize codebase: {e}", file=sys.stderr)
+                print(f"  Path was: {self._configured_codebase_path}", file=sys.stderr)
+                print(f"  Use switch_codebase() to select a codebase manually.", file=sys.stderr)
 
     def switch_codebase(self, path: str) -> dict:
         """Switch to a different codebase."""
@@ -455,9 +465,35 @@ class ClaudeCollaboratorServer(ServerMiddleware):
                 return self._process_tool_result(name, arguments,
                     [TextContent(type="text", text=f"Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}")])
 
+    def _start_background_warmup(self):
+        """Initialize the codebase and start embedding-model warmup off the
+        main thread.
+
+        Must be called only AFTER the stdio transport is up (so the model
+        load's stdout is already captured) and never blocks: the actual model
+        load happens in ensure_warmup_started()'s own daemon thread. Kicking
+        this here — instead of warming synchronously before asyncio.run() —
+        keeps the MCP initialize handshake fast (the load takes ~20-25s and was
+        previously blocking the handshake past the client's startup timeout, so
+        the server never connected). GLM streaming is still protected from
+        GIL contention with the load by VectorStore.wait_if_loading(); read
+        paths degrade gracefully via is_model_ready() until the model is ready.
+        """
+        def _bg():
+            try:
+                self._ensure_codebase()  # builds vector_store, kicks ensure_warmup_started()
+            except Exception as e:
+                print(f"[startup] background warmup skipped: {e}", file=sys.stderr, flush=True)
+
+        threading.Thread(target=_bg, daemon=True, name="startup-warmup").start()
+
     async def run(self):
         """Run the MCP server"""
         async with stdio_server() as (read_stream, write_stream):
+            # Kick codebase init + embedding-model warmup now that the stdio
+            # transport has captured sys.stdout. Background, non-blocking — the
+            # initialize handshake below is answered immediately.
+            self._start_background_warmup()
             await self.app.run(
                 read_stream,
                 write_stream,
@@ -468,42 +504,17 @@ class ClaudeCollaboratorServer(ServerMiddleware):
 def main():
     """Main entry point.
 
-    Startup ordering matters a lot here. The sentence-transformers import
-    (scipy/sklearn/torch) is CPU- and GIL-heavy. If it runs in a background
-    thread once the asyncio loop is live, it contends for the GIL with both the
-    stdio transport loop and any concurrent GLM stream — the first
-    brainstorm/explore call would then take its first token minutes late
-    (measured: 243s in-server vs ~5s for a direct API call). So instead we warm
-    the model SYNCHRONOUSLY on the main thread BEFORE asyncio.run(): a one-time
-    ~15-20s cost (loaded from the local HF cache, no network) that runs with no
-    contention and is fully done before any tool is served. Handshake is delayed
-    by that warm, which MCP clients tolerate; every tool call afterward — GLM or
-    memory — runs against an already-loaded model.
+    The embedding model is GIL-heavy to load (sentence-transformers pulls in
+    scipy/sklearn/torch, ~20-25s). It is NOT warmed here on the main thread:
+    doing that before asyncio.run() blocked the MCP initialize handshake past
+    the client's startup timeout, so the server never finished connecting.
+    Instead the warmup is kicked from a background thread inside
+    ClaudeCollaboratorServer.run(), after the stdio transport is up, so the
+    handshake is answered immediately. GLM streaming is kept from contending
+    with the load via VectorStore.wait_if_loading(); memory read paths degrade
+    gracefully via is_model_ready() until the model is loaded.
     """
     import os
-    import threading
-    import time as _time
-
-    # Warm the embedding model SYNCHRONOUSLY on the main thread, before the
-    # asyncio loop starts. The sentence-transformers import (scipy/sklearn/torch)
-    # is GIL-heavy; done here (single-threaded, pre-loop) it is a one-time
-    # ~15-20s cost with no contention, and it then NEVER competes with a GLM
-    # stream or the stdio transport loop. Loading it lazily in a background
-    # thread instead lets that import contend for the GIL with the event loop
-    # and any concurrent GLM stream, which is what caused first-call brainstorm
-    # to take its first token minutes late. The model load reads from the local
-    # HF cache (local_files_only), so this is fast and never hits the network.
-    if os.environ.get("CODEBASE_PATH"):
-        try:
-            from claude_collaborator.memory_vector import VectorStore
-            _vs = VectorStore(os.environ["CODEBASE_PATH"])
-            if _vs._check_embedding_available():
-                _t0 = _time.time()
-                print("[main] warming embedding model (main thread)...", file=sys.stderr, flush=True)
-                _vs._get_embedding_model()  # populates VectorStore._preloaded_model
-                print(f"[main] embedding model ready ({_time.time() - _t0:.1f}s)", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"[main] embedding warm skipped: {e}", file=sys.stderr, flush=True)
 
     # Pre-warm DNS + TCP to the GLM endpoint. The FIRST GLM call (brainstorm/
     # explore/etc.) otherwise pays a cold getaddrinfo() for api.z.ai *while* the
