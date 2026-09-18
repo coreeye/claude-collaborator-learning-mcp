@@ -314,11 +314,9 @@ class ClaudeCollaboratorServer(ServerMiddleware):
         def _invoke(handler):
             _trace(f"_invoke handler name={name} streaming={name in GLM_STREAMING_HANDLERS}")
             if name in GLM_STREAMING_HANDLERS:
-                # Never let a GLM stream race the GIL-heavy embedding import/load
-                # (e.g. brainstorm right after a session-start memory search that
-                # kicked off lazy warmup). Bounded wait; no-op once loaded.
-                if VECTOR_MEMORY_AVAILABLE:
-                    VectorStore.wait_if_loading()
+                # The embedding model loads in a separate worker process
+                # (memory_vector.EmbeddingWorker), so nothing here contends
+                # with it any more.
                 return handler(self, arguments, progress_callback=progress_callback)
             return handler(self, arguments)
 
@@ -363,6 +361,16 @@ class ClaudeCollaboratorServer(ServerMiddleware):
 
         return self._process_tool_result(name, arguments,
             [TextContent(type="text", text=result_text)])
+
+    def _tool_timeout(self, tool_name: str) -> float:
+        """Wall-clock budget for one tool call. GLM streaming tools get the longer one."""
+        key = "tool_timeout_glm" if tool_name in GLM_STREAMING_HANDLERS else "tool_timeout"
+        default = 300.0 if key == "tool_timeout_glm" else 120.0
+        try:
+            value = float(self.config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return value if value > 0 else default
 
     def _build_progress_callback(self, tool_name: str):
         """Build a progress_callback that bridges sync GLM streaming chunks
@@ -451,33 +459,43 @@ class ClaudeCollaboratorServer(ServerMiddleware):
                 _trace(f"call_tool name={name} progress_callback built")
 
                 # Run the entire tool dispatch in a thread to avoid blocking
-                # the async event loop (embedding model loading, vector search,
-                # and tool handlers can all block for seconds)
-                _trace(f"call_tool name={name} dispatching to executor")
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, self._dispatch_tool, name, arguments, progress_callback
+                # the async event loop (vector search, GLM calls and tool
+                # handlers can all block for seconds). The wait is bounded:
+                # whatever goes wrong underneath, the client gets an answer.
+                limit = self._tool_timeout(name)
+                _trace(f"call_tool name={name} dispatching to executor (timeout {limit:.0f}s)")
+                result = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, self._dispatch_tool, name, arguments, progress_callback
+                    ),
+                    timeout=limit,
                 )
                 _trace(f"call_tool name={name} EXIT ok ({sum(len(getattr(c,'text','')) for c in result)} chars)")
                 return result
 
+            except asyncio.TimeoutError:
+                limit = self._tool_timeout(name)
+                _trace(f"call_tool name={name} EXIT TIMEOUT after {limit:.0f}s")
+                return [TextContent(type="text", text=(
+                    f"Error: tool '{name}' did not finish within {limit:.0f}s. "
+                    "The server is still working on it in the background; retry in a moment. "
+                    "(Limits: tool_timeout / tool_timeout_glm in the config, TOOL_TIMEOUT / TOOL_TIMEOUT_GLM in the environment.)"
+                ))]
             except Exception as e:
                 _trace(f"call_tool name={name} EXIT ERROR {type(e).__name__}: {e}")
                 return self._process_tool_result(name, arguments,
                     [TextContent(type="text", text=f"Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}")])
 
     def _start_background_warmup(self):
-        """Initialize the codebase and start embedding-model warmup off the
+        """Initialize the codebase and start the embedding worker process off the
         main thread.
 
-        Must be called only AFTER the stdio transport is up (so the model
-        load's stdout is already captured) and never blocks: the actual model
-        load happens in ensure_warmup_started()'s own daemon thread. Kicking
-        this here — instead of warming synchronously before asyncio.run() —
-        keeps the MCP initialize handshake fast (the load takes ~20-25s and was
-        previously blocking the handshake past the client's startup timeout, so
-        the server never connected). GLM streaming is still protected from
-        GIL contention with the load by VectorStore.wait_if_loading(); read
-        paths degrade gracefully via is_model_ready() until the model is ready.
+        Never blocks: ensure_warmup_started() only spawns the child process
+        (memory_vector.EmbeddingWorker); the model loads inside that process.
+        Nothing GIL-heavy or DLL-loading runs in the server, so the MCP
+        initialize handshake stays fast and tool calls keep flowing while the
+        model loads. Memory read paths degrade via is_model_ready() until then;
+        writes are queued and flushed when the worker reports ready.
         """
         def _bg():
             try:
@@ -504,25 +522,20 @@ class ClaudeCollaboratorServer(ServerMiddleware):
 def main():
     """Main entry point.
 
-    The embedding model is GIL-heavy to load (sentence-transformers pulls in
-    scipy/sklearn/torch, ~20-25s). It is NOT warmed here on the main thread:
-    doing that before asyncio.run() blocked the MCP initialize handshake past
-    the client's startup timeout, so the server never finished connecting.
-    Instead the warmup is kicked from a background thread inside
-    ClaudeCollaboratorServer.run(), after the stdio transport is up, so the
-    handshake is answered immediately. GLM streaming is kept from contending
-    with the load via VectorStore.wait_if_loading(); memory read paths degrade
-    gracefully via is_model_ready() until the model is loaded.
+    The embedding model (sentence-transformers: scipy/sklearn/torch, ~10-25s to
+    import and load) is never loaded in this process. It runs in a child
+    process started from ClaudeCollaboratorServer.run() after the stdio
+    transport is up (memory_vector.EmbeddingWorker / embed_worker.py). Loading
+    those native libraries in-process held the Windows loader lock, which
+    blocks thread creation, and one blocked ThreadPoolExecutor thread start
+    froze the asyncio loop for as long as the load took (minutes). Memory read
+    paths degrade via is_model_ready() until the worker is ready.
     """
     import os
 
-    # Pre-warm DNS + TCP to the GLM endpoint. The FIRST GLM call (brainstorm/
-    # explore/etc.) otherwise pays a cold getaddrinfo() for api.z.ai *while* the
-    # embedding-model import storm (scipy/sklearn/torch) is hogging the GIL.
-    # That combination has been observed to push the stream-open past
-    # open_timeout — surfacing as a "hang" on the first call that then succeeds
-    # on retry only because DNS is now cached. Priming the resolver here makes
-    # the first real call's connect fast. Best-effort: never blocks, never raises.
+    # Pre-warm DNS + TCP to the GLM endpoint so the first GLM call does not pay
+    # a cold getaddrinfo() + connect on top of the request. Best-effort: never
+    # blocks, never raises.
     if os.environ.get("GLM_API_KEY"):
         def _prewarm_glm_connection():
             import socket

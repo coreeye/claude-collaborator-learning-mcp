@@ -50,6 +50,9 @@ class Config:
         # Auto-learning settings
         "learn_dedup_threshold": ["LEARN_DEDUP_THRESHOLD"],
         "learn_glm_extract": ["LEARN_GLM_EXTRACT"],
+        # Tool-call wall-clock limits (seconds)
+        "tool_timeout": ["TOOL_TIMEOUT"],
+        "tool_timeout_glm": ["TOOL_TIMEOUT_GLM"],
     }
 
     def __init__(self, working_dir: Path = None):
@@ -83,6 +86,9 @@ class Config:
             # GLM Auto-enrich defaults
             "auto_glm_enrich": True,  # automatically enrich with GLM in background
             "glm_proactive_suggestions": True,  # show GLM tips in tool results
+            # Tool-call limits: the MCP client always gets an answer within these
+            "tool_timeout": 120,  # seconds, ordinary tools
+            "tool_timeout_glm": 300,  # seconds, GLM streaming tools
         }
 
         # Load from home config (global defaults)

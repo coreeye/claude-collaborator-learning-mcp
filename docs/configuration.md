@@ -134,6 +134,35 @@ Settings are loaded in this order (later sources override earlier ones):
 | `AUTO_GLM_ENRICH` | Enable GLM auto-enrich (true/false) |
 | `PYTHONUNBUFFERED` | Set to `1` to force unbuffered stdout (recommended for stdio MCP transport) |
 | `CLAUDE_COLLAB_DEBUG` | Set to `1` to enable verbose tool-call tracing to `%TEMP%/claude_collaborator_debug.log` and a 30 s GLM-stream watchdog that dumps thread stacks. Off by default. |
+| `TOOL_TIMEOUT` | Seconds a tool call may take before the client gets a timeout answer (default `120`). |
+| `TOOL_TIMEOUT_GLM` | Same for the GLM streaming tools (default `300`). |
+| `EMBEDDING_TIMEOUT` | Seconds to wait for one embedding request to the worker process before it is killed and respawned (default `20`). |
+
+## Embedding Worker Process
+
+Embeddings for semantic memory are computed in a child process
+(`claude_collaborator/embed_worker.py`), started by the server right after the
+MCP handshake. The server process never imports sentence-transformers, torch
+or scipy.
+
+Why: loading those native libraries holds the Windows loader lock for as long
+as the load takes, and while it is held no new thread can start in that
+process. `ThreadPoolExecutor.submit()` starts threads under a module-global
+lock, so a single blocked thread start froze the asyncio loop and every tool
+call with it. In practice the second `learn` call of a session hung for 5 to 49
+minutes whenever it arrived while the model was still loading.
+
+Behaviour:
+
+- Until the worker reports ready, semantic searches return nothing and writes
+  are queued; they are flushed automatically when the worker is ready.
+- Every wait on the worker is bounded (`EMBEDDING_TIMEOUT`). A worker that
+  dies or stops answering is killed and respawned up to three times; after
+  that semantic memory stays off for that server process and the structured
+  (file) memory keeps working.
+- The worker's messages go to the server's stderr, so they appear in the MCP
+  host's log (`[embed] worker pid=... ready: dim=384 load=9.7s`).
+- `memory_vector_stats` shows `embedding_worker_ready` and `pending_writes`.
 
 ## Auto-Detection
 

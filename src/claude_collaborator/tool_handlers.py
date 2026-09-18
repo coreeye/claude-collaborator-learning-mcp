@@ -309,6 +309,8 @@ def handle_memory_vector_stats(server, arguments: dict) -> str:
     output = f"""Vector Memory Status:
 - Database: {stats['db_path']}
 - Embeddings Available: {stats['embeddings_available']}
+- Embedding Worker Ready: {stats.get('embedding_worker_ready')}
+- Pending Writes (queued until the worker is ready): {stats.get('pending_writes', 0)}
 - Model: {stats['embedding_model']}
 - Total Entries: {stats['total_entries']}
 - Entries by Category:"""

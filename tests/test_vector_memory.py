@@ -16,6 +16,9 @@ from claude_collaborator.memory_context import ContextTracker
 from claude_collaborator.memory_auto import AutoCapture
 from claude_collaborator.memory_store import MemoryStore
 
+# Embeddings come from a worker process; give it time to load the model once.
+READY_TIMEOUT = 180
+
 
 def test_vector_store_basic():
     """Test basic VectorStore operations"""
@@ -23,6 +26,7 @@ def test_vector_store_basic():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         vs = VectorStore(tmpdir)
+        vs.wait_until_ready(READY_TIMEOUT)
 
         # Test adding
         vid = vs.add(
@@ -59,6 +63,7 @@ def test_context_tracker():
     with tempfile.TemporaryDirectory() as tmpdir:
         from claude_collaborator.memory_vector import VectorStore
         vs = VectorStore(tmpdir)
+        vs.wait_until_ready(READY_TIMEOUT)
 
         if not vs._check_embedding_available():
             print("[SKIP] Skipping (embeddings not available)")
@@ -89,6 +94,7 @@ def test_auto_capture():
     with tempfile.TemporaryDirectory() as tmpdir:
         from claude_collaborator.memory_vector import VectorStore
         vs = VectorStore(tmpdir)
+        vs.wait_until_ready(READY_TIMEOUT)
         ms = MemoryStore(tmpdir)
 
         if not vs._check_embedding_available():
@@ -130,6 +136,7 @@ def test_graceful_fallback():
     # This test verifies the code handles missing sentence-transformers gracefully
     with tempfile.TemporaryDirectory() as tmpdir:
         vs = VectorStore(tmpdir)
+        vs.wait_until_ready(READY_TIMEOUT)
 
         if not vs._check_embedding_available():
             print("[FAIL] Embeddings should be available for this test")
