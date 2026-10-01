@@ -48,6 +48,21 @@ class TestStreamCompletion(unittest.TestCase):
         self.assertEqual(self.client._stream_completion(lambda: iter(stream), None), "only reasoning")
 
 
+class TestReasoningEffort(unittest.TestCase):
+    def _client(self, **env):
+        with patch.dict("os.environ", {"GLM_API_KEY": "test-key", **env}):
+            return GLMClient()
+
+    def test_defaults_to_high(self):
+        self.assertEqual(self._client()._extra_body(), {"reasoning_effort": "high"})
+
+    def test_env_override(self):
+        self.assertEqual(self._client(GLM_REASONING_EFFORT="LOW")._extra_body(), {"reasoning_effort": "low"})
+
+    def test_empty_env_omits_parameter(self):
+        self.assertEqual(self._client(GLM_REASONING_EFFORT="")._extra_body(), {})
+
+
 class TestTopicFromText(unittest.TestCase):
     def test_version_numbers_not_split(self):
         self.assertEqual(

@@ -21,6 +21,11 @@ _STREAM_END = object()
 
 DEFAULT_MODEL = "glm-5.3"
 
+# glm-5.3 reasons at "max" effort unless told otherwise, which can exhaust a
+# 4k budget on open-ended prompts. "high" fits; override with GLM_REASONING_EFFORT
+# (low | high | max). Set it empty to omit the parameter (e.g. for older models).
+DEFAULT_REASONING_EFFORT = "high"
+
 # Thinking models spend part of max_tokens on reasoning before the answer, so
 # budgets below ~4k can be exhausted with no answer produced.
 DEFAULT_MAX_TOKENS = 4096
@@ -61,6 +66,7 @@ class GLMClient:
         self.api_key = os.getenv("GLM_API_KEY")
         self.model = os.getenv("GLM_MODEL", DEFAULT_MODEL)
         self.base_url = "https://api.z.ai/api/paas/v4"
+        self.reasoning_effort = os.getenv("GLM_REASONING_EFFORT", DEFAULT_REASONING_EFFORT).strip().lower()
         self.timeout = 120  # 120 second wall-clock timeout for API calls
         self.idle_timeout = 30  # per-chunk no-data timeout for streams
         # Wall-clock cap for the *initial* stream-open call. The SDK's own
@@ -72,6 +78,10 @@ class GLMClient:
 
         if not self.api_key:
             raise ValueError("GLM_API_KEY not found in environment variables")
+
+    def _extra_body(self) -> Dict[str, Any]:
+        """Provider-specific request fields shared by every completion call."""
+        return {"reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}
 
     def _stream_completion(
         self,
@@ -285,6 +295,7 @@ Be specific and reference code elements when possible."""
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
+                    extra_body=self._extra_body(),
                 ),
                 progress_callback,
             )
@@ -330,6 +341,7 @@ Be specific and reference code elements when possible."""
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
+                    extra_body=self._extra_body(),
                 ),
                 progress_callback,
             )
@@ -390,6 +402,7 @@ Provide:
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
+                    extra_body=self._extra_body(),
                 ),
                 progress_callback,
             )
@@ -449,6 +462,7 @@ Provide a comprehensive analysis including:
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
+                    extra_body=self._extra_body(),
                 ),
                 progress_callback,
             )
@@ -506,6 +520,7 @@ Don't just validate the obvious approach. Push boundaries and surface ideas that
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
+                    extra_body=self._extra_body(),
                 ),
                 progress_callback,
             )
@@ -552,6 +567,7 @@ Don't just validate the obvious approach. Push boundaries and surface ideas that
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
+                    extra_body=self._extra_body(),
                 ),
                 progress_callback,
             )
@@ -623,6 +639,7 @@ Output ONLY the bullet list. No preamble, no analysis steps, no numbering of you
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
+                    extra_body=self._extra_body(),
                 ),
                 progress_callback,
             )
@@ -685,6 +702,7 @@ Output ONLY the bullet list. No preamble, no analysis steps, no numbering of you
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
+                    extra_body=self._extra_body(),
                 ),
                 progress_callback,
             )

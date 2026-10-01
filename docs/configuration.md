@@ -129,6 +129,7 @@ Settings are loaded in this order (later sources override earlier ones):
 | `CODEBASE_PATH` | Path to your C# solution |
 | `GLM_API_KEY` | GLM API key |
 | `GLM_MODEL` | GLM model (default: glm-5.3) |
+| `GLM_REASONING_EFFORT` | glm-5.3 reasoning effort: `low`, `high` (default) or `max`. Empty omits the parameter. |
 | `MEMORY_PATH` | Memory storage path |
 | `EMBEDDING_MODEL` | Embedding model for semantic search |
 | `AUTO_GLM_ENRICH` | Enable GLM auto-enrich (true/false) |
