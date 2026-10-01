@@ -89,7 +89,7 @@ Settings are loaded in this order (later sources override earlier ones):
 |--------|------|---------|-------------|
 | `codebase_path` | string | auto-detected | Path to C# solution root |
 | `glm_api_key` | string | (none) | API key for GLM integration |
-| `glm_model` | string | `glm-5.1` | GLM model to use |
+| `glm_model` | string | `glm-5.3` | GLM model to use |
 | `memory_path` | string | `.codebase-memory` | Path for memory storage |
 
 ### Vector Memory Options
@@ -128,7 +128,7 @@ Settings are loaded in this order (later sources override earlier ones):
 |----------|-------------|
 | `CODEBASE_PATH` | Path to your C# solution |
 | `GLM_API_KEY` | GLM API key |
-| `GLM_MODEL` | GLM model (default: glm-5.1) |
+| `GLM_MODEL` | GLM model (default: glm-5.3) |
 | `MEMORY_PATH` | Memory storage path |
 | `EMBEDDING_MODEL` | Embedding model for semantic search |
 | `AUTO_GLM_ENRICH` | Enable GLM auto-enrich (true/false) |
@@ -184,13 +184,13 @@ pip install claude-collaborator[glm]
 
 ### Available Models
 
-- `glm-5.1` - Flagship model with deep thinking (**default**, verified working)
-- `glm-4.6` - Previous generation, also available
+- `glm-5.3` - Latest flagship (released 2026-08-14, **default**, verified working). Thinking
+  cannot be disabled, so token budgets must cover reasoning plus the answer.
+- `glm-5.3-flash` / `glm-5.3-flashx` - Faster, cheaper 5.3 variants
+- `glm-5.2` - Previous flagship
+- `glm-5.1` - Earlier flagship with deep thinking
+- `glm-4.6` - Older generation, also available
 - `glm-4-plus` - Enhanced capabilities
-- `glm-5.2` - Newest flagship (announced 2026-06-13). Requires API entitlement
-  that is still rolling out to direct-API keys; using it before your key has
-  access returns `HTTP 403 "You do not have permission to access glm-5.2"`.
-  Switch via `GLM_MODEL=glm-5.2` once z.ai enables it for your account.
 
 ## Troubleshooting
 

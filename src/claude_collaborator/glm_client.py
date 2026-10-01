@@ -1,8 +1,8 @@
 """
 GLM Client for AI Research Tasks
 Handles communication with the GLM API (z.ai). Model is configurable via
-GLM_MODEL; default glm-5.1. glm-5.2 is the latest model but requires API
-entitlement that not all keys have yet (returns HTTP 403 otherwise).
+GLM_MODEL; default glm-5.3. glm-5.3 always thinks (thinking cannot be
+disabled), so max_tokens budgets must cover reasoning plus the answer.
 """
 
 import concurrent.futures
@@ -18,6 +18,13 @@ load_dotenv()
 
 
 _STREAM_END = object()
+
+DEFAULT_MODEL = "glm-5.3"
+
+# Thinking models spend part of max_tokens on reasoning before the answer, so
+# budgets below ~4k can be exhausted with no answer produced.
+DEFAULT_MAX_TOKENS = 4096
+DEEP_DIVE_MAX_TOKENS = 8192
 
 ProgressCallback = Callable[[str, int], None]
 
@@ -52,7 +59,7 @@ class GLMClient:
     def __init__(self):
         """Initialize GLM client"""
         self.api_key = os.getenv("GLM_API_KEY")
-        self.model = os.getenv("GLM_MODEL", "glm-5.1")
+        self.model = os.getenv("GLM_MODEL", DEFAULT_MODEL)
         self.base_url = "https://api.z.ai/api/paas/v4"
         self.timeout = 120  # 120 second wall-clock timeout for API calls
         self.idle_timeout = 30  # per-chunk no-data timeout for streams
@@ -147,6 +154,7 @@ class GLMClient:
         total_chars = 0
         chunks_seen = 0
         first_chunk_at: Optional[float] = None
+        finish_reason: Optional[str] = None
 
         ex = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="GLMChunk"
@@ -190,6 +198,7 @@ class GLMClient:
                 if not choices:
                     continue
 
+                finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
                 delta = choices[0].delta
                 piece_content = getattr(delta, "content", None) or ""
                 piece_reason = getattr(delta, "reasoning_content", None) or ""
@@ -218,6 +227,13 @@ class GLMClient:
 
         elapsed = time.monotonic() - t0
         _trace(f"_stream_completion EXIT after {elapsed:.2f}s ({chunks_seen} chunks, {total_chars} chars)")
+        if not content_parts and finish_reason == "length":
+            # The whole budget went on reasoning. The reasoning trace is not an
+            # answer, so report the truncation instead of passing it off as one.
+            raise RuntimeError(
+                "GLM used its entire max_tokens budget on reasoning and produced no "
+                "answer (finish_reason=length); retry with a larger max_tokens"
+            )
         if prefer_content_over_reasoning:
             return "".join(content_parts) if content_parts else "".join(reasoning_parts)
         else:
@@ -227,7 +243,7 @@ class GLMClient:
         self,
         question: str,
         context: str = "",
-        max_tokens: int = 2048,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """
@@ -370,7 +386,7 @@ Provide:
                 lambda: client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=2048,
+                    max_tokens=DEFAULT_MAX_TOKENS,
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
@@ -429,7 +445,7 @@ Provide a comprehensive analysis including:
                 lambda: client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=4096,
+                    max_tokens=DEEP_DIVE_MAX_TOKENS,
                     temperature=1.0,
                     timeout=self.timeout,
                     stream=True,
@@ -444,7 +460,7 @@ Provide a comprehensive analysis including:
         self,
         challenge: str,
         context: str = "",
-        max_tokens: int = 2048,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """
@@ -548,7 +564,7 @@ Don't just validate the obvious approach. Push boundaries and surface ideas that
         code: str,
         file_path: str = "",
         focus: str = "",
-        max_tokens: int = 1024,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
         """

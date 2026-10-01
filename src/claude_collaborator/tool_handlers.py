@@ -10,6 +10,18 @@ import re
 from datetime import datetime
 from typing import Optional
 
+from .glm_client import DEFAULT_MAX_TOKENS
+
+
+def _topic_from_text(text: str) -> str:
+    """Topic = first sentence, capped at 60 chars.
+
+    Splits on a period followed by whitespace so versions and filenames
+    (glm-5.1, Foo.cs) are not cut in half.
+    """
+    first = re.split(r"\.\s", text, maxsplit=1)[0].strip()
+    return first[:60]
+
 
 def handle_get_config(server, arguments: dict) -> str:
     config_data = {
@@ -118,7 +130,7 @@ def handle_learn(server, arguments: dict) -> str:
         category = AutoCapture.categorize_text(observation)
 
     # Generate topic from first sentence or first 60 chars
-    topic = observation.split('.')[0].strip()[:60] if '.' in observation[:80] else observation[:60]
+    topic = _topic_from_text(observation)
 
     # Deduplicate: check if a very similar observation already exists
     dedup_threshold = server.config.get("learn_dedup_threshold", 0.85)
@@ -202,7 +214,7 @@ def handle_session_learn(server, arguments: dict, progress_callback=None) -> str
             from .memory_auto import AutoCapture
             cat = AutoCapture.categorize_text(obs)
 
-        topic = obs.split('.')[0].strip()[:60] if '.' in obs[:80] else obs[:60]
+        topic = _topic_from_text(obs)
         metadata = {
             "learned_at": datetime.now().isoformat(),
             "source": "session_learn"
@@ -246,7 +258,7 @@ def handle_session_learn(server, arguments: dict, progress_callback=None) -> str
             glm_result = server.glm.explore(
                 question="Extract key learnings from this session summary",
                 context=f"Session summary:\n{summary[:4000]}\n\nExtract specific learnings about: codebase patterns, workarounds, user preferences, architecture insights, edge cases. Return each as a bullet point.",
-                max_tokens=2048,
+                max_tokens=DEFAULT_MAX_TOKENS,
                 progress_callback=progress_callback,
             )
             if glm_result and not glm_result.startswith("Error"):
@@ -799,7 +811,7 @@ Provide:
     result = server.glm.explore(
         question=f"Summarize file: {arguments['file_path']}",
         context=prompt,
-        max_tokens=2048,
+        max_tokens=DEFAULT_MAX_TOKENS,
         progress_callback=progress_callback,
     )
 
@@ -824,7 +836,7 @@ Can you suggest an alternative approach? Keep it practical and concise."""
     result = server.glm.explore(
         question="Alternative approach",
         context=prompt,
-        max_tokens=2048,
+        max_tokens=DEFAULT_MAX_TOKENS,
         progress_callback=progress_callback,
     )
 
@@ -849,7 +861,7 @@ What are the potential risks, edge cases, or problems? Be concise and practical.
     result = server.glm.explore(
         question="Risk check",
         context=prompt,
-        max_tokens=2048,
+        max_tokens=DEFAULT_MAX_TOKENS,
         progress_callback=progress_callback,
     )
 
@@ -866,7 +878,7 @@ def handle_brainstorm(server, arguments: dict, progress_callback=None) -> str:
     result = server.glm.brainstorm(
         challenge=server._truncate_for_glm(challenge, 5000),
         context=server._truncate_for_glm(context, 5000) if context else "",
-        max_tokens=2048,
+        max_tokens=DEFAULT_MAX_TOKENS,
         progress_callback=progress_callback,
     )
 

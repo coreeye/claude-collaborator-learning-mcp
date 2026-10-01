@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 
 from mcp.types import TextContent
 
+from .glm_client import DEFAULT_MAX_TOKENS
+
 
 class ServerMiddleware:
     """
@@ -148,11 +150,11 @@ class ServerMiddleware:
                 glm_response = self.glm.explore(
                     question=f"Auto-enrich for {tool_name}",
                     context=prompt,
-                    max_tokens=512
+                    max_tokens=DEFAULT_MAX_TOKENS
                 )
 
                 # Store GLM insights in vector memory for future retrieval
-                if self.vector_store and glm_response and len(glm_response) > 50:
+                if self.vector_store and glm_response and len(glm_response) > 50 and not glm_response.startswith("Error"):
                     arg_summary = str(arguments)[:80]
                     self.vector_store.add(
                         topic=f"glm:{tool_name}:{arg_summary}",
